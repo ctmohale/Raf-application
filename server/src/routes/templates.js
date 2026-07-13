@@ -6,7 +6,7 @@ import { PDFDocument } from 'pdf-lib';
 import { db, serializeField, serializeTemplate } from '../db/db.js';
 import { authenticate, authenticateJwtOrApiKey, hashApiKey } from '../middleware/auth.js';
 import { pdfUpload, spreadsheetUpload } from '../middleware/upload.js';
-import { originalsDir, resolveInside } from '../config.js';
+import { generatedDir, originalsDir, resolveInside } from '../config.js';
 import { detectFieldsFromPdf } from '../services/fieldDetection.js';
 import { generateFilledPdf, validateDataAgainstFields } from '../services/pdfFill.js';
 import { parseSpreadsheet } from '../services/spreadsheet.js';
@@ -164,6 +164,34 @@ templatesRouter.get('/:id/pdf', authenticate, (req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
+templatesRouter.patch('/:id', authenticate, (req, res) => {
+  const template = getTemplateOr404(req, res);
+  if (!template) return;
+
+  const name = String(req.body?.name || '').trim();
+  const status = String(req.body?.status || template.status).trim();
+  const allowedStatuses = new Set(['needs_setup', 'ready', 'archived']);
+
+  if (!name) return res.status(400).json({ error: 'Template name is required' });
+  if (!allowedStatuses.has(status)) return res.status(400).json({ error: 'Choose a valid template status' });
+
+  db.prepare(`
+    UPDATE document_templates
+    SET name = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND user_id = ?
+  `).run(name, status, template.id, req.user.id);
+
+  const updated = db.prepare(`
+    SELECT document_templates.*, COUNT(template_fields.id) AS field_count
+    FROM document_templates
+    LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
+    WHERE document_templates.id = ? AND document_templates.user_id = ?
+    GROUP BY document_templates.id
+  `).get(template.id, req.user.id);
+
+  return res.json({ template: serializeTemplate(updated) });
+});
+
 templatesRouter.post('/:id/fields/detect', authenticate, async (req, res, next) => {
   try {
     const template = getTemplateOr404(req, res);
@@ -295,6 +323,28 @@ templatesRouter.delete('/:id/fields/:fieldId', authenticate, (req, res) => {
     SET status = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(count ? 'ready' : 'needs_setup', template.id);
+  return res.status(204).end();
+});
+
+templatesRouter.delete('/:id', authenticate, (req, res) => {
+  const template = getTemplateOr404(req, res);
+  if (!template) return;
+
+  const generatedDocuments = db.prepare(`
+    SELECT stored_filename
+    FROM generated_documents
+    WHERE template_id = ? AND user_id = ?
+  `).all(template.id, req.user.id);
+
+  db.prepare('DELETE FROM document_templates WHERE id = ? AND user_id = ?').run(template.id, req.user.id);
+
+  fs.rm(resolveInside(originalsDir, template.stored_filename), { force: true }, () => {});
+  for (const document of generatedDocuments) {
+    if (document.stored_filename) {
+      fs.rm(resolveInside(generatedDir, document.stored_filename), { force: true }, () => {});
+    }
+  }
+
   return res.status(204).end();
 });
 

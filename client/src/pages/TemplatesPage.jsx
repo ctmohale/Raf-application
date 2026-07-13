@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, ClipboardList, FileInput, FileText, Filter, Layers3, PencilRuler, Search, Table2, UploadCloud, X } from 'lucide-react';
-import { Link, useParams } from 'react-router-dom';
-import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
+import { CheckCircle2, ClipboardList, FileInput, FileText, Filter, Layers3, Pencil, PencilRuler, Search, Table2, Trash2, UploadCloud, X } from 'lucide-react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { ButtonSpinner, LoadingSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
 
 export default function TemplatesPage() {
   const { id: firmId } = useParams();
+  const [searchParams] = useSearchParams();
   const isFirmTemplates = Boolean(firmId);
   const [templates, setTemplates] = useState([]);
   const [firm, setFirm] = useState(null);
@@ -20,6 +21,12 @@ export default function TemplatesPage() {
   const [message, setMessage] = useState('');
   const [pageLoading, setPageLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [deletingTemplateId, setDeletingTemplateId] = useState(null);
+  const [deleteTemplateTarget, setDeleteTemplateTarget] = useState(null);
+  const [editTemplateTarget, setEditTemplateTarget] = useState(null);
+  const [editTemplateForm, setEditTemplateForm] = useState({ name: '', status: 'needs_setup' });
+  const [editTemplateError, setEditTemplateError] = useState('');
+  const [savingTemplate, setSavingTemplate] = useState(false);
 
   function loadTemplates() {
     return apiRequest(isFirmTemplates ? `/api/firms/${firmId}/templates` : '/api/templates')
@@ -35,6 +42,10 @@ export default function TemplatesPage() {
       .catch((err) => setError(err.message))
       .finally(() => setPageLoading(false));
   }, [firmId, isFirmTemplates]);
+
+  useEffect(() => {
+    setSearchTerm(searchParams.get('q') || '');
+  }, [searchParams]);
 
   const readyTemplates = templates.filter((template) => template.status === 'ready').length;
   const totalFields = templates.reduce((sum, template) => sum + Number(template.field_count || 0), 0);
@@ -57,6 +68,21 @@ export default function TemplatesPage() {
     setUploadName('');
     setUploadFile(null);
     setUploadError('');
+  }
+
+  function openEditTemplate(template) {
+    setEditTemplateTarget(template);
+    setEditTemplateForm({
+      name: template.name || '',
+      status: template.status || 'needs_setup'
+    });
+    setEditTemplateError('');
+  }
+
+  function closeEditTemplate() {
+    setEditTemplateTarget(null);
+    setEditTemplateForm({ name: '', status: 'needs_setup' });
+    setEditTemplateError('');
   }
 
   async function handleUpload(event) {
@@ -84,6 +110,51 @@ export default function TemplatesPage() {
       setUploadError(err.message);
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function confirmDeleteTemplate() {
+    if (!deleteTemplateTarget) return;
+
+    setDeletingTemplateId(deleteTemplateTarget.id);
+    setError('');
+    setMessage('');
+
+    try {
+      await apiRequest(`/api/templates/${deleteTemplateTarget.id}`, { method: 'DELETE' });
+      setMessage(`${deleteTemplateTarget.name} deleted.`);
+      setDeleteTemplateTarget(null);
+      await loadTemplates();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingTemplateId(null);
+    }
+  }
+
+  async function saveTemplateRecord(event) {
+    event.preventDefault();
+    if (!editTemplateTarget) return;
+
+    setSavingTemplate(true);
+    setEditTemplateError('');
+    setError('');
+    setMessage('');
+
+    try {
+      const result = await apiRequest(`/api/templates/${editTemplateTarget.id}`, {
+        method: 'PATCH',
+        body: editTemplateForm
+      });
+      setTemplates((current) => current.map((template) => (
+        template.id === result.template.id ? result.template : template
+      )));
+      setMessage(`${result.template.name} updated.`);
+      closeEditTemplate();
+    } catch (err) {
+      setEditTemplateError(err.message);
+    } finally {
+      setSavingTemplate(false);
     }
   }
 
@@ -197,16 +268,19 @@ export default function TemplatesPage() {
               <tbody>
                 {filteredTemplates.map((template) => (
                   <tr key={template.id}>
-                    <td>
+                    <td data-label="Template">
                       <strong>{template.name}</strong>
                       <span>{template.original_filename}</span>
                     </td>
-                    <td>{template.page_count}</td>
-                    <td>{template.field_count}</td>
-                    <td><span className={`status-pill ${template.status}`}>{template.status.replace('_', ' ')}</span></td>
-                    <td>{new Date(template.created_at).toLocaleDateString()}</td>
-                    {!isFirmTemplates && <td>
+                    <td data-label="Pages">{template.page_count}</td>
+                    <td data-label="Fields">{template.field_count}</td>
+                    <td data-label="Status"><span className={`status-pill ${template.status}`}>{template.status.replace('_', ' ')}</span></td>
+                    <td data-label="Created">{new Date(template.created_at).toLocaleDateString()}</td>
+                    {!isFirmTemplates && <td data-label="Actions">
                       <div className="table-actions">
+                        <button type="button" onClick={() => openEditTemplate(template)} title="Edit record" aria-label={`Edit record for ${template.name}`}>
+                          <Pencil size={15} />
+                        </button>
                         <Link to={`/templates/${template.id}/edit`} title="Edit fields" aria-label={`Edit fields for ${template.name}`}>
                           <PencilRuler size={15} />
                         </Link>
@@ -219,6 +293,16 @@ export default function TemplatesPage() {
                         <Link to={`/templates/${template.id}/form`} title="Generate document" aria-label={`Generate document from ${template.name}`}>
                           <ClipboardList size={15} />
                         </Link>
+                        <button
+                          className="danger-icon"
+                          type="button"
+                          onClick={() => setDeleteTemplateTarget(template)}
+                          disabled={deletingTemplateId === template.id}
+                          title="Delete template"
+                          aria-label={`Delete ${template.name}`}
+                        >
+                          {deletingTemplateId === template.id ? <LoadingSpinner size="sm" label="Deleting template..." /> : <Trash2 size={15} />}
+                        </button>
                       </div>
                     </td>}
                   </tr>
@@ -261,6 +345,83 @@ export default function TemplatesPage() {
                 </button>
               </div>
             </form>
+          </section>
+        </div>
+      )}
+
+      {editTemplateTarget && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="edit-template-title">
+            <div className="modal-header">
+              <div>
+                <h3 id="edit-template-title">Edit template record</h3>
+                <p>Update the template name and availability status. PDF file details stay unchanged.</p>
+              </div>
+              <button className="icon-button ghost" type="button" onClick={closeEditTemplate} aria-label="Close edit template modal">
+                <X size={18} />
+              </button>
+            </div>
+
+            <form className="form-stack firm-form" onSubmit={saveTemplateRecord}>
+              <label>
+                Template name
+                <input
+                  value={editTemplateForm.name}
+                  onChange={(event) => setEditTemplateForm((current) => ({ ...current, name: event.target.value }))}
+                  required
+                />
+              </label>
+              <label>
+                Status
+                <select
+                  value={editTemplateForm.status}
+                  onChange={(event) => setEditTemplateForm((current) => ({ ...current, status: event.target.value }))}
+                >
+                  <option value="needs_setup">Needs setup</option>
+                  <option value="ready">Ready</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </label>
+              <div className="confirm-dialog-body">
+                <strong>{editTemplateTarget.original_filename}</strong>
+                <span>{editTemplateTarget.page_count} page(s) · {editTemplateTarget.field_count} field(s)</span>
+              </div>
+              <StatusMessage type="error">{editTemplateError}</StatusMessage>
+              <div className="modal-actions">
+                <button className="secondary-button" type="button" onClick={closeEditTemplate} disabled={savingTemplate}>Cancel</button>
+                <button className="primary-button" disabled={savingTemplate}>
+                  {savingTemplate ? <ButtonSpinner label="Saving..." /> : <Pencil size={17} />}
+                  {!savingTemplate && 'Save record'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {deleteTemplateTarget && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-template-title">
+            <div className="modal-header">
+              <div>
+                <h3 id="delete-template-title">Delete template</h3>
+                <p>This will remove the template, saved fields, and linked generated records.</p>
+              </div>
+              <button className="icon-button ghost" type="button" onClick={() => setDeleteTemplateTarget(null)} aria-label="Close delete confirmation">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="confirm-dialog-body">
+              <strong>{deleteTemplateTarget.name}</strong>
+              <span>{deleteTemplateTarget.original_filename}</span>
+            </div>
+            <div className="modal-actions">
+              <button className="secondary-button" type="button" onClick={() => setDeleteTemplateTarget(null)} disabled={deletingTemplateId === deleteTemplateTarget.id}>Cancel</button>
+              <button className="danger-button" type="button" onClick={confirmDeleteTemplate} disabled={deletingTemplateId === deleteTemplateTarget.id}>
+                {deletingTemplateId === deleteTemplateTarget.id ? <ButtonSpinner label="Deleting..." /> : <Trash2 size={17} />}
+                {deletingTemplateId !== deleteTemplateTarget.id && 'Delete template'}
+              </button>
+            </div>
           </section>
         </div>
       )}

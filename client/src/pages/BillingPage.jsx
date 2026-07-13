@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Banknote, Building2, Calculator, FileText, Filter, Save, Search, Users } from 'lucide-react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { ButtonSpinner, LoadingSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
@@ -12,6 +12,7 @@ const currencyFormatter = new Intl.NumberFormat('en-ZA', {
 
 export default function BillingPage() {
   const { id: firmId } = useParams();
+  const [searchParams] = useSearchParams();
   const isFirmBilling = Boolean(firmId);
   const [billing, setBilling] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -39,6 +40,10 @@ export default function BillingPage() {
       .then(applyBillingResult)
       .catch((err) => setError(err.message));
   }, [firmId, isFirmBilling]);
+
+  useEffect(() => {
+    setSearchTerm(searchParams.get('q') || '');
+  }, [searchParams]);
 
   const rows = billing?.rows || [];
   const filteredRows = rows.filter((row) => {
@@ -222,15 +227,15 @@ export default function BillingPage() {
                   <tbody>
                     {filteredRows.map((row) => (
                       <tr key={row.firm_id}>
-                        <td>
+                        <td data-label="Firm">
                           <strong>{row.firm_name}</strong>
                           <span>{row.contact_email || row.slug}</span>
                         </td>
-                        <td>{row.clients}</td>
-                        <td>{row.applications}</td>
-                        <td>{row.open_applications}</td>
-                        <td>{row.uploaded_documents}</td>
-                        <td>
+                        <td data-label="Clients">{row.clients}</td>
+                        <td data-label="Applications">{row.applications}</td>
+                        <td data-label="Open apps">{row.open_applications}</td>
+                        <td data-label="Uploads">{row.uploaded_documents}</td>
+                        <td data-label="Rate">
                           {!isFirmBilling && (
                             <form className="firm-rate-control" onSubmit={(event) => updateFirmBillingRate(event, row)}>
                               <input
@@ -256,9 +261,9 @@ export default function BillingPage() {
 	                          )}
 	                          {isFirmBilling && currencyFormatter.format(row.rate_per_application)}
 	                        </td>
-                        <td><code>{currencyFormatter.format(row.amount_due)}</code></td>
-                        <td>{row.last_application_at ? new Date(row.last_application_at).toLocaleDateString() : '-'}</td>
-                        <td><span className={`status-pill ${row.status}`}>{row.status}</span></td>
+                        <td data-label="Amount due"><code>{currencyFormatter.format(row.amount_due)}</code></td>
+                        <td data-label="Last application">{row.last_application_at ? new Date(row.last_application_at).toLocaleDateString() : '-'}</td>
+                        <td data-label="Status"><span className={`status-pill ${row.status}`}>{row.status}</span></td>
                       </tr>
                     ))}
                   </tbody>

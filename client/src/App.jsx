@@ -8,6 +8,7 @@ import DocumentsPage from './pages/DocumentsPage.jsx';
 import DocumentPreviewPage from './pages/DocumentPreviewPage.jsx';
 import FirmsPage from './pages/FirmsPage.jsx';
 import LoginPage from './pages/LoginPage.jsx';
+import MedicalAssessmentPage from './pages/MedicalAssessmentPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
 import SpreadsheetMappingPage from './pages/SpreadsheetMappingPage.jsx';
 import TemplateEditorPage from './pages/TemplateEditorPage.jsx';
@@ -36,6 +37,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/client-upload/:token" element={<ClientUploadPage />} />
+      <Route path="/medical-assessment/:token" element={<MedicalAssessmentPage />} />
       <Route path="/" element={<Protected><DashboardPage /></Protected>} />
       <Route path="/activity" element={<Protected><ActivityLogsPage /></Protected>} />
       <Route path="/billing" element={<Protected><BillingPage /></Protected>} />

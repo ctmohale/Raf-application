@@ -104,6 +104,28 @@ function drawTextInBox(page, box, value, pageHeight, font, color = rgb(0.03, 0.0
   });
 }
 
+function checkboxMarkStyle(field) {
+  const option = Array.isArray(field?.options)
+    ? field.options.find((item) => item && item.kind === 'checkbox-mark-style')
+    : null;
+  return option?.value === 'check' ? 'check' : 'x';
+}
+
+function drawCheckMark(page, { x, y, size, color }) {
+  page.drawLine({
+    start: { x: x + size * 0.22, y: y + size * 0.48 },
+    end: { x: x + size * 0.42, y: y + size * 0.25 },
+    thickness: Math.max(1.4, size * 0.12),
+    color
+  });
+  page.drawLine({
+    start: { x: x + size * 0.42, y: y + size * 0.25 },
+    end: { x: x + size * 0.8, y: y + size * 0.76 },
+    thickness: Math.max(1.4, size * 0.12),
+    color
+  });
+}
+
 function isSignatureField(field) {
   const label = String(field?.label || '').trim().toLowerCase();
   const name = String(field?.name || '').trim().toLowerCase();
@@ -172,16 +194,28 @@ export async function generateFilledPdf({ template, fields, data, userId, source
     const signatureImage = signatureField ? parseDataImage(value) : null;
 
     if (field.field_type === 'checkbox') {
+      const boxSize = Number(field.height);
+      const boxX = Number(field.x);
+      const boxY = pageHeight - Number(field.y) - Number(field.height);
       page.drawRectangle({
-        x: Number(field.x),
-        y: pageHeight - Number(field.y) - Number(field.height),
-        width: Number(field.height),
-        height: Number(field.height),
+        x: boxX,
+        y: boxY,
+        width: boxSize,
+        height: boxSize,
         borderColor: rgb(0.15, 0.2, 0.28),
         borderWidth: 1
       });
       if (truthy(value)) {
-        page.drawText('X', { x: Number(field.x) + 4, y: pageHeight - Number(field.y) - Number(field.height) + 3, size: fontSize + 2, font });
+        if (checkboxMarkStyle(field) === 'check') {
+          drawCheckMark(page, {
+            x: boxX,
+            y: boxY,
+            size: boxSize,
+            color: rgb(0.03, 0.09, 0.18)
+          });
+        } else {
+          page.drawText('X', { x: boxX + 4, y: boxY + 3, size: fontSize + 2, font });
+        }
       }
       continue;
     }

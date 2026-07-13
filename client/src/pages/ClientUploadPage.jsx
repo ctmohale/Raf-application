@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2, CircleDashed, FileUp, Save, UploadCloud } from 'lucide-react';
+import { Car, CheckCircle2, CircleDashed, FileUp, FolderOpen, Save, ShieldCheck, UploadCloud, UserRound } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { ButtonSpinner } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
@@ -34,6 +34,10 @@ function parseJson(value, fallback = {}) {
   } catch {
     return fallback;
   }
+}
+
+function isVisibleDocumentRequest(request) {
+  return String(request?.label || '').trim().toLowerCase() !== 'medical report';
 }
 
 function ClientPortalLoader() {
@@ -77,6 +81,7 @@ export default function ClientUploadPage() {
   const [portal, setPortal] = useState(null);
   const [files, setFiles] = useState({});
   const [intakeForm, setIntakeForm] = useState(emptyIntakeForm);
+  const [lockedIntakeFields, setLockedIntakeFields] = useState({});
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [uploadingId, setUploadingId] = useState(null);
@@ -101,8 +106,7 @@ export default function ClientUploadPage() {
     const witnesses = parseJson(latestCase.witnesses_json, []);
     const witness = Array.isArray(witnesses) ? witnesses[0] || {} : {};
 
-    setPortal(result);
-    setIntakeForm({
+    const nextIntakeForm = {
       cell: result.client?.cell || '',
       email: result.client?.email || '',
       passport_number: result.client?.passport_number || '',
@@ -121,11 +125,26 @@ export default function ClientUploadPage() {
       witness_name: witness.name || '',
       witness_contact: witness.contact || '',
       witness_statement: witness.statement || ''
-    });
+    };
+
+    setPortal(result);
+    setIntakeForm(nextIntakeForm);
+    setLockedIntakeFields(Object.fromEntries(
+      Object.entries(nextIntakeForm).map(([field, value]) => [field, String(value || '').trim() !== ''])
+    ));
   }
 
   function updateIntakeField(field, value) {
+    if (lockedIntakeFields[field]) return;
     setIntakeForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function lockedFieldProps(field) {
+    if (!lockedIntakeFields[field]) return {};
+    return {
+      disabled: true,
+      title: 'This information is already on file and cannot be changed here.'
+    };
   }
 
   function chooseDocumentFile(requestId) {
@@ -182,8 +201,9 @@ export default function ClientUploadPage() {
   }
 
   if (loadingPortal && !portal && !error) return <ClientPortalLoader />;
-  const uploadedCount = portal?.requests?.filter((request) => request.status === 'uploaded' || request.original_filename).length || 0;
-  const requestCount = portal?.requests?.length || 0;
+  const visibleRequests = portal?.requests?.filter(isVisibleDocumentRequest) || [];
+  const uploadedCount = visibleRequests.filter((request) => request.status === 'uploaded' || request.original_filename).length;
+  const requestCount = visibleRequests.length;
   const uploadProgress = requestCount ? Math.round((uploadedCount / requestCount) * 100) : 0;
 
   return (
@@ -204,93 +224,119 @@ export default function ClientUploadPage() {
           <>
             <div className="client-upload-intro">
               <h2>{portal.client.first_name} {portal.client.surname}</h2>
-              <p>Confirm your details, add missing claim information, and upload the requested documents for your RAF application.</p>
+              <p>Confirm details and upload requested documents.</p>
             </div>
 
             <form className="client-intake-form" onSubmit={saveIntakeInfo}>
               <div className="client-intake-header">
                 <div>
                   <h3>Client intake information</h3>
-                  <p>Add anything missing so the law firm can prepare the correct RAF forms.</p>
+                  <p>Add missing claim details.</p>
                 </div>
                 <button className="primary-button" type="submit" disabled={savingInfo}>
                   <Save size={17} />
                   {savingInfo ? <ButtonSpinner label="Saving..." /> : 'Save information'}
                 </button>
               </div>
-              <div className="client-intake-grid">
-                <label>
-                  Contact number
-                  <input value={intakeForm.cell} onChange={(event) => updateIntakeField('cell', event.target.value)} />
-                </label>
-                <label>
-                  Email
-                  <input type="email" value={intakeForm.email} onChange={(event) => updateIntakeField('email', event.target.value)} />
-                </label>
-                <label>
-                  Passport number
-                  <input value={intakeForm.passport_number} onChange={(event) => updateIntakeField('passport_number', event.target.value)} />
-                </label>
-                <label>
-                  Date of birth
-                  <input type="date" value={intakeForm.date_of_birth || ''} onChange={(event) => updateIntakeField('date_of_birth', event.target.value)} />
-                </label>
-                <label className="span-2">
-                  Residential address
-                  <textarea value={intakeForm.residential_address} onChange={(event) => updateIntakeField('residential_address', event.target.value)} />
-                </label>
-                <label>
-                  Occupation
-                  <input value={intakeForm.occupation} onChange={(event) => updateIntakeField('occupation', event.target.value)} />
-                </label>
-                <label>
-                  Employer details
-                  <input value={intakeForm.employer_details} onChange={(event) => updateIntakeField('employer_details', event.target.value)} />
-                </label>
-                <label>
-                  Accident time
-                  <input type="time" value={intakeForm.accident_time || ''} onChange={(event) => updateIntakeField('accident_time', event.target.value)} />
-                </label>
-                <label>
-                  Police station
-                  <input value={intakeForm.police_station} onChange={(event) => updateIntakeField('police_station', event.target.value)} />
-                </label>
-                <label>
-                  Police case number
-                  <input value={intakeForm.police_case_number} onChange={(event) => updateIntakeField('police_case_number', event.target.value)} />
-                </label>
-                <label className="span-2">
-                  Accident location
-                  <input value={intakeForm.accident_location} onChange={(event) => updateIntakeField('accident_location', event.target.value)} />
-                </label>
-                <label className="span-2">
-                  Description of collision
-                  <textarea value={intakeForm.collision_description} onChange={(event) => updateIntakeField('collision_description', event.target.value)} />
-                </label>
-                <label className="span-2">
-                  Vehicle details
-                  <textarea value={intakeForm.vehicle_description} onChange={(event) => updateIntakeField('vehicle_description', event.target.value)} />
-                </label>
-                <label>
-                  Driver name
-                  <input value={intakeForm.driver_name} onChange={(event) => updateIntakeField('driver_name', event.target.value)} />
-                </label>
-                <label>
-                  Driver contact
-                  <input value={intakeForm.driver_contact} onChange={(event) => updateIntakeField('driver_contact', event.target.value)} />
-                </label>
-                <label>
-                  Witness name
-                  <input value={intakeForm.witness_name} onChange={(event) => updateIntakeField('witness_name', event.target.value)} />
-                </label>
-                <label>
-                  Witness contact
-                  <input value={intakeForm.witness_contact} onChange={(event) => updateIntakeField('witness_contact', event.target.value)} />
-                </label>
-                <label className="span-2">
-                  Witness information
-                  <textarea value={intakeForm.witness_statement} onChange={(event) => updateIntakeField('witness_statement', event.target.value)} />
-                </label>
+              <div className="client-intake-sections">
+                <section className="client-intake-section">
+                  <div className="client-intake-section-title">
+                    <UserRound size={17} />
+                    <h4>Your details</h4>
+                  </div>
+                  <div className="client-intake-grid">
+                    <label>
+                      Contact number
+                      <input value={intakeForm.cell} onChange={(event) => updateIntakeField('cell', event.target.value)} placeholder="Your phone number" {...lockedFieldProps('cell')} />
+                    </label>
+                    <label>
+                      Email
+                      <input type="email" value={intakeForm.email} onChange={(event) => updateIntakeField('email', event.target.value)} placeholder="Your email address" {...lockedFieldProps('email')} />
+                    </label>
+                    <label>
+                      Passport number
+                      <input value={intakeForm.passport_number} onChange={(event) => updateIntakeField('passport_number', event.target.value)} placeholder="If applicable" {...lockedFieldProps('passport_number')} />
+                    </label>
+                    <label>
+                      Date of birth
+                      <input type="date" value={intakeForm.date_of_birth || ''} onChange={(event) => updateIntakeField('date_of_birth', event.target.value)} {...lockedFieldProps('date_of_birth')} />
+                    </label>
+                    <label className="span-2">
+                      Residential address
+                      <textarea value={intakeForm.residential_address} onChange={(event) => updateIntakeField('residential_address', event.target.value)} placeholder="Street address, suburb, city" {...lockedFieldProps('residential_address')} />
+                    </label>
+                    <label>
+                      Occupation
+                      <input value={intakeForm.occupation} onChange={(event) => updateIntakeField('occupation', event.target.value)} placeholder="Current occupation" {...lockedFieldProps('occupation')} />
+                    </label>
+                    <label>
+                      Employer details
+                      <input value={intakeForm.employer_details} onChange={(event) => updateIntakeField('employer_details', event.target.value)} placeholder="Employer name or details" {...lockedFieldProps('employer_details')} />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="client-intake-section">
+                  <div className="client-intake-section-title">
+                    <ShieldCheck size={17} />
+                    <h4>Accident and police details</h4>
+                  </div>
+                  <div className="client-intake-grid">
+                    <label>
+                      Accident time
+                      <input type="time" value={intakeForm.accident_time || ''} onChange={(event) => updateIntakeField('accident_time', event.target.value)} {...lockedFieldProps('accident_time')} />
+                    </label>
+                    <label>
+                      Police station
+                      <input value={intakeForm.police_station} onChange={(event) => updateIntakeField('police_station', event.target.value)} placeholder="Station name" {...lockedFieldProps('police_station')} />
+                    </label>
+                    <label>
+                      Police case number
+                      <input value={intakeForm.police_case_number} onChange={(event) => updateIntakeField('police_case_number', event.target.value)} placeholder="Case number" {...lockedFieldProps('police_case_number')} />
+                    </label>
+                    <label className="span-2">
+                      Accident location
+                      <input value={intakeForm.accident_location} onChange={(event) => updateIntakeField('accident_location', event.target.value)} placeholder="Where the accident happened" {...lockedFieldProps('accident_location')} />
+                    </label>
+                    <label className="span-2">
+                      Description of collision
+                      <textarea value={intakeForm.collision_description} onChange={(event) => updateIntakeField('collision_description', event.target.value)} placeholder="Briefly describe what happened" {...lockedFieldProps('collision_description')} />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="client-intake-section">
+                  <div className="client-intake-section-title">
+                    <Car size={17} />
+                    <h4>Vehicle, driver, and witnesses</h4>
+                  </div>
+                  <div className="client-intake-grid">
+                    <label className="span-2">
+                      Vehicle details
+                      <textarea value={intakeForm.vehicle_description} onChange={(event) => updateIntakeField('vehicle_description', event.target.value)} placeholder="Vehicle registration, make, model, or other details" {...lockedFieldProps('vehicle_description')} />
+                    </label>
+                    <label>
+                      Driver name
+                      <input value={intakeForm.driver_name} onChange={(event) => updateIntakeField('driver_name', event.target.value)} placeholder="Driver full name" {...lockedFieldProps('driver_name')} />
+                    </label>
+                    <label>
+                      Driver contact
+                      <input value={intakeForm.driver_contact} onChange={(event) => updateIntakeField('driver_contact', event.target.value)} placeholder="Driver phone number" {...lockedFieldProps('driver_contact')} />
+                    </label>
+                    <label>
+                      Witness name
+                      <input value={intakeForm.witness_name} onChange={(event) => updateIntakeField('witness_name', event.target.value)} placeholder="Witness full name" {...lockedFieldProps('witness_name')} />
+                    </label>
+                    <label>
+                      Witness contact
+                      <input value={intakeForm.witness_contact} onChange={(event) => updateIntakeField('witness_contact', event.target.value)} placeholder="Witness phone number" {...lockedFieldProps('witness_contact')} />
+                    </label>
+                    <label className="span-2">
+                      Witness information
+                      <textarea value={intakeForm.witness_statement} onChange={(event) => updateIntakeField('witness_statement', event.target.value)} placeholder="Any witness notes or statement details" {...lockedFieldProps('witness_statement')} />
+                    </label>
+                  </div>
+                </section>
               </div>
             </form>
 
@@ -311,13 +357,16 @@ export default function ClientUploadPage() {
               </div>
 
               <div className="client-request-list">
-                {portal.requests.map((request) => (
+                {visibleRequests.map((request) => (
                   <article className={`client-request-card ${request.status === 'uploaded' ? 'uploaded' : ''} ${files[request.id] ? 'ready' : ''}`} key={request.id}>
+                    <span className="client-request-icon" aria-hidden="true">
+                      {request.status === 'uploaded' ? <CheckCircle2 size={18} /> : <FolderOpen size={18} />}
+                    </span>
                     <div className="client-request-copy">
                       <div className="client-request-title-row">
                         <h3>{request.label}</h3>
                       </div>
-                      <p>{request.original_filename ? `Uploaded: ${request.original_filename}` : 'PDF, image, Word document, or scan accepted.'}</p>
+                      <p>{request.original_filename ? `Uploaded: ${request.original_filename}` : 'PDF, image, or Word file.'}</p>
                       <div className="client-selected-file-row">
                         <div className={`client-selected-file ${files[request.id] ? 'ready' : ''}`} title={files[request.id]?.name || 'No file selected yet'}>
                           {files[request.id] ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />}

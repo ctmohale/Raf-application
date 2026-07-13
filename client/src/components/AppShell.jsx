@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Home,
   LogOut,
+  Menu,
   MessageSquare,
   Moon,
   Search,
@@ -17,7 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { NavLink, useMatch, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation, useMatch, useNavigate } from 'react-router-dom';
 import { LoadingSpinner } from './LoadingSpinner.jsx';
 import { apiRequest } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
@@ -25,13 +26,16 @@ import { useAuth } from '../lib/auth.jsx';
 export default function AppShell({ children }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [firmName, setFirmName] = useState('');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [messageOverview, setMessageOverview] = useState(null);
   const [activeMessageFirmId, setActiveMessageFirmId] = useState('');
   const [messageThread, setMessageThread] = useState(null);
   const [messageInput, setMessageInput] = useState('');
   const [threadSearch, setThreadSearch] = useState('');
+  const [globalSearch, setGlobalSearch] = useState('');
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
   const [notificationError, setNotificationError] = useState('');
@@ -115,6 +119,15 @@ export default function AppShell({ children }) {
   }, [firmId, isFirmWorkspace]);
 
   useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    setGlobalSearch(params.get('q') || '');
+  }, [location.search]);
+
+  useEffect(() => {
     if (!notificationsOpen || !activeFirmKey) return;
     loadMessageThread(activeFirmKey, isFirmWorkspace ? 'firm' : 'admin').catch((err) => setNotificationError(err.message));
   }, [notificationsOpen, activeFirmKey, isFirmWorkspace]);
@@ -185,57 +198,88 @@ export default function AppShell({ children }) {
     navigate('/login');
   }
 
+  function handleGlobalSearch(event) {
+    event.preventDefault();
+    const query = globalSearch.trim();
+    const adminSearchPaths = ['/firms', '/billing', '/activity', '/templates', '/documents'];
+    const firmSearchPaths = [`${firmBasePath}/clients`, `${firmBasePath}/claims`, `${firmBasePath}/billing`];
+    const currentPath = location.pathname;
+    const targetPath = isFirmWorkspace
+      ? firmSearchPaths.includes(currentPath) ? currentPath : `${firmBasePath}/claims`
+      : adminSearchPaths.includes(currentPath) ? currentPath : '/firms';
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    navigate({ pathname: targetPath, search: params.toString() ? `?${params.toString()}` : '' });
+  }
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <aside className={`sidebar ${mobileNavOpen ? 'mobile-open' : ''}`}>
 	        <div className="brand">
 	          <div className="brand-mark">RF</div>
 	          <div>
 	            <strong>RAFFlow</strong>
 	            <span>{workspaceLabel}</span>
 	          </div>
+            <button
+              className="mobile-nav-toggle"
+              type="button"
+              aria-controls="mobile-navigation"
+              aria-expanded={mobileNavOpen}
+              aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+              onClick={() => setMobileNavOpen((current) => !current)}
+            >
+              {mobileNavOpen ? <X size={18} /> : <Menu size={18} />}
+            </button>
 	        </div>
-        <nav className="nav-list">
-          {isFirmWorkspace ? (
-            <>
-              <NavLink to={`${firmBasePath}/workspace`}><Home size={18} /> Dashboard</NavLink>
-              <NavLink to={`${firmBasePath}/clients`}><Users size={18} /> Clients</NavLink>
-              <NavLink to={`${firmBasePath}/claims`}><BriefcaseBusiness size={18} /> Claims</NavLink>
-              <NavLink to={`${firmBasePath}/billing`}><Banknote size={18} /> Billing</NavLink>
-            </>
-          ) : (
-            <>
-              <NavLink to="/"><Home size={18} /> Dashboard</NavLink>
-              {user?.role === 'admin' && <NavLink to="/firms"><FolderOpen size={18} /> Law firms</NavLink>}
-              {user?.role === 'admin' && <NavLink to="/billing"><Banknote size={18} /> Billing</NavLink>}
-              {user?.role === 'admin' && <NavLink to="/activity"><Activity size={18} /> Activity</NavLink>}
-              <NavLink to="/templates"><FolderOpen size={18} /> Templates</NavLink>
-              <NavLink to="/documents"><FileText size={18} /> Documents</NavLink>
-            </>
+        <div className="mobile-nav-content" id="mobile-navigation">
+          <nav className="nav-list">
+            {isFirmWorkspace ? (
+              <>
+                <NavLink to={`${firmBasePath}/workspace`}><Home size={18} /> Dashboard</NavLink>
+                <NavLink to={`${firmBasePath}/clients`}><Users size={18} /> Clients</NavLink>
+                <NavLink to={`${firmBasePath}/claims`}><BriefcaseBusiness size={18} /> Claims</NavLink>
+                <NavLink to={`${firmBasePath}/billing`}><Banknote size={18} /> Billing</NavLink>
+              </>
+            ) : (
+              <>
+                <NavLink to="/"><Home size={18} /> Dashboard</NavLink>
+                {user?.role === 'admin' && <NavLink to="/firms"><FolderOpen size={18} /> Law firms</NavLink>}
+                {user?.role === 'admin' && <NavLink to="/billing"><Banknote size={18} /> Billing</NavLink>}
+                {user?.role === 'admin' && <NavLink to="/activity"><Activity size={18} /> Activity</NavLink>}
+                <NavLink to="/templates"><FolderOpen size={18} /> Templates</NavLink>
+                <NavLink to="/documents"><FileText size={18} /> Documents</NavLink>
+              </>
+            )}
+          </nav>
+          {!isFirmWorkspace && (
+            <div className="sidebar-section">
+	              <span>Settings</span>
+	              <nav className="nav-list">
+	                <NavLink to="/settings/workspace"><Settings size={18} /> Workspace</NavLink>
+	                <NavLink to="/settings/security"><ShieldCheck size={18} /> Security</NavLink>
+	              </nav>
+	            </div>
           )}
-        </nav>
-        {!isFirmWorkspace && (
-          <div className="sidebar-section">
-	            <span>Settings</span>
-	            <nav className="nav-list">
-	              <NavLink to="/settings/workspace"><Settings size={18} /> Workspace</NavLink>
-	              <NavLink to="/settings/security"><ShieldCheck size={18} /> Security</NavLink>
-	            </nav>
-	          </div>
-        )}
-        <div className="sidebar-summary">
-          <span>Secure workspace</span>
-          <strong>{isFirmWorkspace ? 'Firm claim files' : 'RAF claim files'}</strong>
-          <div className="storage-bar"><i /></div>
-          <small>Encrypted local document storage</small>
+          <div className="sidebar-summary">
+            <span>Secure workspace</span>
+            <strong>{isFirmWorkspace ? 'Firm claim files' : 'RAF claim files'}</strong>
+            <div className="storage-bar"><i /></div>
+            <small>Encrypted local document storage</small>
+          </div>
         </div>
       </aside>
       <main className="main-area">
         <header className="topbar">
-          <label className="search-bar" aria-label="Search">
+          <form className="search-bar" aria-label="Search" role="search" onSubmit={handleGlobalSearch}>
             <Search size={18} />
-            <input type="search" placeholder={isFirmWorkspace ? 'Search this firm workspace...' : 'Search firms, applications, documents...'} />
-          </label>
+            <input
+              type="search"
+              value={globalSearch}
+              onChange={(event) => setGlobalSearch(event.target.value)}
+              placeholder={isFirmWorkspace ? 'Search this firm workspace...' : 'Search firms, applications, documents...'}
+            />
+          </form>
 	          <div className="user-menu">
 	            <button
 	              className="icon-button notification-button"

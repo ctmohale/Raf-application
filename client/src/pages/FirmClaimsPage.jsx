@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { BellRing, BriefcaseBusiness, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Maximize2, Minimize2, Search, Sparkles, Type, UploadCloud, X } from 'lucide-react';
-import { useParams } from 'react-router-dom';
+import { BellRing, BriefcaseBusiness, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Maximize2, Minimize2, Search, Send, Sparkles, Trash2, Type, UploadCloud, X } from 'lucide-react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { ButtonSpinner, LoadingSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
@@ -144,6 +144,72 @@ function isBlankFormValue(value) {
   return value == null || String(value).trim() === '';
 }
 
+function hasFilledTemplateValue(value) {
+  if (Array.isArray(value)) return value.some(hasFilledTemplateValue);
+  if (value && typeof value === 'object') return Object.values(value).some(hasFilledTemplateValue);
+  if (typeof value === 'boolean') return value;
+  return !isBlankFormValue(value);
+}
+
+function getClaimFormInputStatus(form) {
+  const input = form?.document?.input && typeof form.document.input === 'object' ? form.document.input : {};
+  const total = Number(form?.template?.field_count || 0);
+  const filled = Object.values(input).filter(hasFilledTemplateValue).length;
+  const safeTotal = total || Math.max(Object.keys(input).length, filled);
+  const safeFilled = safeTotal ? Math.min(filled, safeTotal) : 0;
+
+  return {
+    filled: safeFilled,
+    total: safeTotal,
+    percent: safeTotal ? Math.round((safeFilled / safeTotal) * 100) : 0
+  };
+}
+
+function getCompletionTone(percent) {
+  return percent >= 100 ? 'complete' : percent >= 75 ? 'high' : percent >= 35 ? 'mid' : 'low';
+}
+
+function ClaimFormInputStatus({ form }) {
+  const status = getClaimFormInputStatus(form);
+  const tone = getCompletionTone(status.percent);
+
+  return (
+    <span className={`claim-form-input-status ${tone}`} title={`${status.filled} of ${status.total} inputs filled`}>
+      <span>
+        <strong>{status.percent}%</strong>
+        <small>{status.total ? `${status.filled}/${status.total} inputs filled` : 'No mapped inputs'}</small>
+      </span>
+      <i aria-hidden="true"><b style={{ width: `${status.percent}%` }} /></i>
+    </span>
+  );
+}
+
+function ClaimFormCompactInputStatus({ form }) {
+  const status = getClaimFormInputStatus(form);
+  const tone = getCompletionTone(status.percent);
+
+  return (
+    <span className={`claim-form-compact-status ${tone}`} title={`${status.filled}/${status.total} inputs filled`}>
+      {status.percent}%
+    </span>
+  );
+}
+
+function ClaimFormsAverageStatus({ forms }) {
+  if (!forms?.length) return null;
+  const statuses = forms.map(getClaimFormInputStatus);
+  const averagePercent = Math.round(statuses.reduce((sum, status) => sum + status.percent, 0) / statuses.length);
+  const filled = statuses.reduce((sum, status) => sum + status.filled, 0);
+  const total = statuses.reduce((sum, status) => sum + status.total, 0);
+  const tone = getCompletionTone(averagePercent);
+
+  return (
+    <span className={`claim-forms-average-status ${tone}`} title={`${averagePercent}% average completion · ${filled}/${total} total inputs filled`}>
+      <span>Avg {averagePercent}%</span>
+    </span>
+  );
+}
+
 function normalizeDataKey(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -275,8 +341,26 @@ const emptyNewClaimForm = {
   reminder_time: '09:00'
 };
 
+const medicalReportTypes = [
+  ['raf_1_medical_section', 'RAF 1 medical section'],
+  ['raf_4_serious_injury', 'RAF 4 serious-injury assessment'],
+  ['supporting_medical_report', 'General supporting medical report'],
+  ['specialist_report', 'Additional specialist report']
+];
+
+const emptyMedicalAssessmentForm = {
+  report_type: 'supporting_medical_report',
+  doctor_name: '',
+  practice_number: '',
+  doctor_email: '',
+  doctor_phone: '',
+  deadline: '',
+  delivery_method: 'link'
+};
+
 export default function FirmClaimsPage() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
   const [workspace, setWorkspace] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [clientFilter, setClientFilter] = useState('all');
@@ -287,6 +371,8 @@ export default function FirmClaimsPage() {
   const [viewingRequestId, setViewingRequestId] = useState(null);
   const [intakeCase, setIntakeCase] = useState(null);
   const [medicalReportCase, setMedicalReportCase] = useState(null);
+  const [medicalAssessmentForm, setMedicalAssessmentForm] = useState(emptyMedicalAssessmentForm);
+  const [creatingMedicalAssessment, setCreatingMedicalAssessment] = useState(false);
   const [claimFormsCase, setClaimFormsCase] = useState(null);
   const [formFilesCase, setFormFilesCase] = useState(null);
   const [claimFormsPayload, setClaimFormsPayload] = useState(null);
@@ -302,6 +388,8 @@ export default function FirmClaimsPage() {
   const [editFormValues, setEditFormValues] = useState({});
   const [editFormLoading, setEditFormLoading] = useState(false);
   const [savingEditedFormId, setSavingEditedFormId] = useState(null);
+  const [deletingClaimFormId, setDeletingClaimFormId] = useState(null);
+  const [deleteClaimFormTarget, setDeleteClaimFormTarget] = useState(null);
   const [editFormFullscreen, setEditFormFullscreen] = useState(false);
   const [editFormFont, setEditFormFont] = useState('sans');
   const [editingSignatureField, setEditingSignatureField] = useState(null);
@@ -309,12 +397,17 @@ export default function FirmClaimsPage() {
   const [newClaimForm, setNewClaimForm] = useState(emptyNewClaimForm);
   const [creatingClaim, setCreatingClaim] = useState(false);
   const [copiedClientId, setCopiedClientId] = useState(null);
+  const [copiedMedicalRequestId, setCopiedMedicalRequestId] = useState(null);
 
   useEffect(() => {
     apiRequest(`/api/firms/${id}/workspace`)
       .then(setWorkspace)
       .catch((err) => setError(err.message));
   }, [id]);
+
+  useEffect(() => {
+    setSearchTerm(searchParams.get('q') || '');
+  }, [searchParams]);
 
   useEffect(() => {
     return () => {
@@ -326,6 +419,7 @@ export default function FirmClaimsPage() {
 
   const cases = workspace?.cases || [];
   const documentRequests = workspace?.documentRequests || [];
+  const medicalAssessmentRequests = workspace?.medicalAssessmentRequests || [];
   const claimForms = workspace?.claimForms || [];
   const clientOptions = workspace?.clients || [];
   const filteredCases = cases.filter((caseRecord) => {
@@ -347,7 +441,13 @@ export default function FirmClaimsPage() {
     return groups;
   }, {});
   const intakeRequests = intakeCase ? requestsByCase[intakeCase.id] || [] : [];
-  const medicalReportRequest = medicalReportCase ? getMedicalReportRequest(medicalReportCase) : null;
+  const medicalAssessmentsByCase = medicalAssessmentRequests.reduce((groups, request) => {
+    const key = request.case_id;
+    groups[key] = groups[key] || [];
+    groups[key].push(request);
+    return groups;
+  }, {});
+  const activeMedicalAssessmentRequest = medicalReportCase ? getMedicalAssessmentRequest(medicalReportCase) : null;
   const claimFormsByCase = claimForms.reduce((groups, form) => {
     const key = form.case_id;
     groups[key] = groups[key] || [];
@@ -373,20 +473,20 @@ export default function FirmClaimsPage() {
     return clientOptions.find((client) => String(client.id) === String(caseRecord?.client_id)) || null;
   }
 
-  function getRequiredForms(caseRecord) {
-    const storedForms = parseJsonValue(caseRecord?.required_forms_json, []);
-    if (Array.isArray(storedForms) && storedForms.length) return storedForms;
-    return getNewClaimFormSelection(caseRecord?.accident_date, 0).forms;
-  }
-
   function formatCompactReference(reference) {
     const value = String(reference || '');
     if (value.length <= 14) return value;
     return `...${value.slice(-10)}`;
   }
 
+  function isStandaloneMedicalReportRequest(request) {
+    const documentType = String(request?.document_type || '').trim().toLowerCase();
+    const label = String(request?.label || '').trim().toLowerCase();
+    return documentType === 'medical_report' || label === 'medical report';
+  }
+
   function getProcessStatus(caseRecord) {
-    const requests = requestsByCase[caseRecord.id] || [];
+    const requests = (requestsByCase[caseRecord.id] || []).filter((request) => !isStandaloneMedicalReportRequest(request));
     const requested = requests.length;
     const uploaded = requests.filter((request) => request.status === 'uploaded' || Number(request.upload_count || 0) > 0).length;
 
@@ -400,33 +500,85 @@ export default function FirmClaimsPage() {
 
     if (uploaded === requested) {
       return {
-        label: 'Ready',
+        label: `Ready ${uploaded}/${requested}`,
         className: 'ready',
-        detail: `${uploaded}/${requested} uploaded`
+        detail: ''
       };
     }
 
     if (uploaded > 0) {
       return {
-        label: 'In progress',
+        label: `In progress ${uploaded}/${requested}`,
         className: 'warning',
-        detail: `${uploaded}/${requested} uploaded`
+        detail: ''
       };
     }
 
     return {
-      label: 'Awaiting docs',
+      label: `Awaiting docs 0/${requested}`,
       className: 'pending',
-      detail: `0/${requested} uploaded`
+      detail: ''
     };
   }
 
-  function getMedicalReportRequest(caseRecord) {
-    return (requestsByCase[caseRecord.id] || []).find((request) => {
-      const documentType = String(request.document_type || '').toLowerCase();
-      const label = String(request.label || '').toLowerCase();
-      return documentType === 'medical_report' || label.includes('medical report');
-    });
+  function getMedicalReportTypeLabel(value) {
+    return medicalReportTypes.find(([type]) => type === value)?.[1] || 'Medical assessment';
+  }
+
+  function getMedicalAssessmentRequest(caseRecord) {
+    return medicalAssessmentsByCase[caseRecord.id]?.[0] || null;
+  }
+
+  function openMedicalAssessment(caseRecord) {
+    const currentRequest = getMedicalAssessmentRequest(caseRecord);
+    setMedicalAssessmentForm(currentRequest ? {
+      report_type: currentRequest.report_type || 'supporting_medical_report',
+      doctor_name: currentRequest.doctor_name || '',
+      practice_number: currentRequest.practice_number || '',
+      doctor_email: currentRequest.doctor_email || '',
+      doctor_phone: currentRequest.doctor_phone || '',
+      deadline: currentRequest.deadline || '',
+      delivery_method: currentRequest.delivery_method || 'email'
+    } : emptyMedicalAssessmentForm);
+    setMedicalReportCase(caseRecord);
+  }
+
+  function updateMedicalAssessmentField(field, value) {
+    setMedicalAssessmentForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function closeMedicalAssessment() {
+    setMedicalReportCase(null);
+    setMedicalAssessmentForm(emptyMedicalAssessmentForm);
+  }
+
+  async function createMedicalAssessment(event) {
+    event.preventDefault();
+    if (!medicalReportCase) return;
+    setCreatingMedicalAssessment(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const result = await apiRequest(`/api/firms/${id}/claims/${medicalReportCase.id}/medical-assessments`, {
+        method: 'POST',
+        body: medicalAssessmentForm
+      });
+      setWorkspace(result.workspace);
+      setMessage(`Medical assessment request created for ${medicalAssessmentForm.doctor_name}.${result.delivery?.sent ? ' Secure link sent.' : ' Copy the secure link to share it.'}`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCreatingMedicalAssessment(false);
+    }
+  }
+
+  async function copyMedicalAssessmentLink(request) {
+    if (!request?.secure_url) return;
+    await navigator.clipboard.writeText(request.secure_url);
+    setCopiedMedicalRequestId(request.id);
+    setMessage('Secure doctor link copied.');
+    setTimeout(() => setCopiedMedicalRequestId(null), 1800);
   }
 
   function updateNewClaimField(field, value) {
@@ -798,6 +950,36 @@ export default function FirmClaimsPage() {
     }
   }
 
+  async function confirmDeleteAttachedClaimForm() {
+    const form = deleteClaimFormTarget?.form;
+    const caseRecord = deleteClaimFormTarget?.caseRecord;
+    if (!form?.id || !caseRecord?.id) return;
+    const formName = form.template?.name || form.document?.file_name || 'attached template';
+
+    setDeletingClaimFormId(form.id);
+    setError('');
+    setMessage('');
+
+    try {
+      const result = await apiRequest(`/api/firms/${id}/claims/${caseRecord.id}/forms/${form.id}`, {
+        method: 'DELETE'
+      });
+      setWorkspace(result.workspace);
+      if (claimFormsCase?.id === caseRecord.id) {
+        setClaimFormsPayload((current) => current ? { ...current, attached_forms: result.attached_forms } : current);
+      }
+      if (editingClaimForm?.form?.id === form.id) {
+        setEditingClaimForm(null);
+      }
+      setDeleteClaimFormTarget(null);
+      setMessage(`${formName} removed from ${caseRecord.first_name} ${caseRecord.surname}.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingClaimFormId(null);
+    }
+  }
+
   function updateEditFormValue(fieldName, value) {
     setEditFormValues((current) => ({ ...current, [fieldName]: value }));
   }
@@ -866,6 +1048,41 @@ export default function FirmClaimsPage() {
     return isSignatureInputField(field) ? `${field.name}__field_${field.id}` : field.name;
   }
 
+  function isMedicalTemplateField(field, fields = editFormFields) {
+    const label = normalizeSectionText(getReadableFieldLabel(field, fields));
+    const section = normalizeSectionText(getEditFormSectionTitle(field));
+
+    if (
+      section.includes('medical practitioner')
+      || section.includes('non serious injuries')
+      || section.includes('accident and treatment')
+      || section.includes('current symptoms')
+      || section.includes('diagnosis')
+      || section.includes('examination')
+      || section.includes('apportionment')
+      || section.includes('exceptions')
+    ) {
+      return true;
+    }
+
+    return (
+      label.includes('medical practitioner')
+      || label.includes('description of injury')
+      || label.includes('describe the nature')
+      || label.includes('medical treatment')
+      || label.includes('current symptoms')
+      || label.includes('complaints')
+      || label.includes('diagnosis')
+      || label.includes('physical examination')
+      || label.includes('diagnostic studies')
+      || label.includes('medical history')
+      || label.includes('social and personal history')
+      || label.includes('educational and occupational')
+      || label.includes('apportionment')
+      || label.includes('evaluator')
+    );
+  }
+
   function buildEditFormPreview(fields, values) {
     const previewValues = { ...values };
     const previewFields = [];
@@ -873,8 +1090,9 @@ export default function FirmClaimsPage() {
     fields.forEach((field) => {
       const readableLabel = getReadableFieldLabel(field, fields);
       const valueKey = getEditFormValueKey(field);
+      const medicalBlocked = isMedicalTemplateField(field, fields);
       if (field.field_type !== 'repeatable') {
-        previewFields.push({ ...field, label: readableLabel, source_value_key: valueKey });
+        previewFields.push({ ...field, label: readableLabel, source_value_key: valueKey, medical_blocked: medicalBlocked });
         return;
       }
 
@@ -901,6 +1119,7 @@ export default function FirmClaimsPage() {
           field_type: 'text',
           required: Boolean(field.required) && index === 0,
           default_value: '',
+          medical_blocked: medicalBlocked,
           source_value_key: valueKey,
           source_line_index: index,
           source_line_count: inputCount
@@ -1025,6 +1244,7 @@ export default function FirmClaimsPage() {
   }
 
   function updateDocumentFieldValue(field, nextValue) {
+    if (field.medical_blocked) return;
     if (nextValue === '__open_signature_pad__') {
       setEditingSignatureField(field);
       return;
@@ -1225,11 +1445,6 @@ export default function FirmClaimsPage() {
       <StatusMessage type="error">{error}</StatusMessage>
       <StatusMessage type="success">{message}</StatusMessage>
 
-      <section className="raf-lodgement-notice">
-        <strong>RAF claim preparation and management</strong>
-        <span>Email is not a valid RAF claim-lodgement method. The original prescribed claim documents must still be served on the RAF by hand, registered post, courier, or fax followed by original.</span>
-      </section>
-
       {workspace && (
         <>
           <div className="firm-stats">
@@ -1309,18 +1524,31 @@ export default function FirmClaimsPage() {
               {cases.length > 0 && filteredCases.length === 0 && <p className="muted">No claims match the selected filters.</p>}
               {filteredCases.length > 0 && (
                 <table className="firm-table claims-table">
+                  <colgroup>
+                    <col className="claim-reference-col" />
+                    <col className="claim-client-col" />
+                    <col className="claim-date-col" />
+                    <col className="claim-opened-col" />
+                    <col className="claim-medical-col" />
+                    <col className="claim-status-col" />
+                    <col className="claim-process-col" />
+                    <col className="claim-template-col" />
+                    <col className="claim-completion-col" />
+                    <col className="claim-files-col" />
+                    <col className="claim-actions-col" />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>Claim reference</th>
                       <th>Client</th>
-                      <th>Required forms</th>
                       <th>Accident date</th>
-                      <th>Medical report</th>
+	                      <th>Opened</th>
+                      <th>Medical request</th>
                       <th>Status</th>
 	                      <th>Process status</th>
 		                      <th>Template forms</th>
+		                      <th>Completion</th>
 		                      <th>Form files</th>
-	                      <th>Opened</th>
 	                      <th>Actions</th>
                     </tr>
                   </thead>
@@ -1329,39 +1557,34 @@ export default function FirmClaimsPage() {
 	                      const processStatus = getProcessStatus(caseRecord);
 	                      const claimFormCount = getClaimFormCount(caseRecord);
 	                      const attachedForms = getAttachedClaimForms(caseRecord);
-                        const requiredForms = getRequiredForms(caseRecord);
-                        const medicalRequest = getMedicalReportRequest(caseRecord);
+                        const medicalAssessmentRequest = getMedicalAssessmentRequest(caseRecord);
 	                      return (
                         <tr key={caseRecord.id}>
-	                          <td className="claim-reference-cell">
+	                          <td className="claim-reference-cell" data-label="Claim reference">
 	                            <strong title={caseRecord.case_reference}>{formatCompactReference(caseRecord.case_reference)}</strong>
 	                            <span>Case #{caseRecord.id}</span>
                           </td>
-                          <td>{caseRecord.first_name} {caseRecord.surname}</td>
-                          <td>
-                            <div className="required-form-list">
-                              {requiredForms.map((formName) => <span key={formName}>{formName}</span>)}
-                            </div>
-                          </td>
-                          <td>{formatDisplayDate(caseRecord.accident_date)}</td>
-                          <td>
+                          <td data-label="Client">{caseRecord.first_name} {caseRecord.surname}</td>
+                          <td data-label="Accident date">{formatDisplayDate(caseRecord.accident_date)}</td>
+	                          <td data-label="Opened">{new Date(caseRecord.opened_at).toLocaleDateString()}</td>
+                          <td data-label="Medical request">
                             <button
-                              className={`claim-form-open-button ${Number(medicalRequest?.upload_count || 0) > 0 ? 'uploaded' : medicalRequest ? 'attached' : 'empty'}`}
+                              className={`claim-form-open-button ${medicalAssessmentRequest ? 'attached' : 'empty'}`}
                               type="button"
-                              onClick={() => setMedicalReportCase(caseRecord)}
-                              title="Open medical report"
-                              aria-label={`Open medical report for ${caseRecord.first_name} ${caseRecord.surname}`}
+                              onClick={() => openMedicalAssessment(caseRecord)}
+                              title={medicalAssessmentRequest ? `Medical assessment requested from ${medicalAssessmentRequest.doctor_name}` : 'Request medical assessment'}
+                              aria-label={`Request medical assessment for ${caseRecord.first_name} ${caseRecord.surname}`}
                             >
                               <FileText size={15} />
-                              <span>{medicalRequest ? `Medical report · ${medicalRequest.upload_count || 0}` : 'Medical report'}</span>
+                              <span>{medicalAssessmentRequest ? 'Requested' : 'Request report'}</span>
                             </button>
                           </td>
-                          <td><span className={`status-pill ${caseRecord.status}`}>{caseRecord.status}</span></td>
-                          <td>
+                          <td data-label="Status"><span className={`status-pill ${caseRecord.status}`}>{caseRecord.status}</span></td>
+                          <td data-label="Process status">
                             <span className={`status-pill ${processStatus.className}`}>{processStatus.label}</span>
-                            <span>{processStatus.detail}</span>
+                            {processStatus.detail && <span>{processStatus.detail}</span>}
                           </td>
-		                          <td>
+		                          <td data-label="Template forms">
 		                            <button
 		                              className={`claim-form-open-button ${claimFormCount > 0 ? 'attached' : 'empty'}`}
 		                              type="button"
@@ -1373,7 +1596,11 @@ export default function FirmClaimsPage() {
 		                              <span>{claimFormCount} attached</span>
 		                            </button>
 	                          </td>
-	                          <td>
+	                          <td data-label="Completion">
+	                            <ClaimFormsAverageStatus forms={attachedForms} />
+	                            {attachedForms.length === 0 && <span className="claim-form-file-empty">No forms</span>}
+	                          </td>
+	                          <td data-label="Form files">
 	                            {attachedForms.length === 0 ? (
 	                              <span className="claim-form-file-empty">No files yet</span>
 	                            ) : (
@@ -1388,8 +1615,7 @@ export default function FirmClaimsPage() {
 	                              </button>
 	                            )}
 	                          </td>
-	                          <td>{new Date(caseRecord.opened_at).toLocaleDateString()}</td>
-		                          <td>
+		                          <td data-label="Actions">
 		                            <div className="table-actions">
 		                              <button
 		                                type="button"
@@ -1715,50 +1941,92 @@ export default function FirmClaimsPage() {
                 <div className="modal-header claim-form-hero">
                   <div>
                     <span className="eyebrow">Medical workflow</span>
-                    <h3 id="medical-report-title">Medical report</h3>
+                    <h3 id="medical-report-title">Request medical report</h3>
                     <p>{medicalReportCase.first_name} {medicalReportCase.surname} · {medicalReportCase.case_reference}</p>
                   </div>
-                  <button className="icon-button ghost" type="button" onClick={() => setMedicalReportCase(null)} aria-label="Close medical report">
+                  <button className="icon-button ghost" type="button" onClick={closeMedicalAssessment} aria-label="Close medical request">
                     <X size={18} />
                   </button>
                 </div>
 
-                <div className="claim-form-picker-list">
-                  {!medicalReportRequest && <p className="muted">No medical report request was created for this claim.</p>}
-                  {medicalReportRequest && (
-                    <div className="claim-form-picker-row">
-                      <span className="claim-form-attached-icon"><FileText size={17} /></span>
-                      <div className="template-card-copy">
-                        <strong>{medicalReportRequest.label}</strong>
+                <div className="medical-request-layout">
+                  <form className="medical-request-form" onSubmit={createMedicalAssessment}>
+                    <div className="medical-request-card-head">
+                      <strong>Doctor request</strong>
+                      <span>Assigned patient only</span>
+                    </div>
+                    <div className="form-grid">
+                      <label className="span-2">
+                        Report type
+                        <select value={medicalAssessmentForm.report_type} onChange={(event) => updateMedicalAssessmentField('report_type', event.target.value)}>
+                          {medicalReportTypes.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        Doctor name
+                        <input value={medicalAssessmentForm.doctor_name} onChange={(event) => updateMedicalAssessmentField('doctor_name', event.target.value)} placeholder="Dr full name" required />
+                      </label>
+                      <label>
+                        Practice number
+                        <input value={medicalAssessmentForm.practice_number} onChange={(event) => updateMedicalAssessmentField('practice_number', event.target.value)} placeholder="HPCSA / practice no." />
+                      </label>
+                      <label>
+                        Doctor email
+                        <input type="email" value={medicalAssessmentForm.doctor_email} onChange={(event) => updateMedicalAssessmentField('doctor_email', event.target.value)} placeholder="doctor@example.com" />
+                      </label>
+                      <label>
+                        Doctor phone
+                        <input value={medicalAssessmentForm.doctor_phone} onChange={(event) => updateMedicalAssessmentField('doctor_phone', event.target.value)} placeholder="SMS number" />
+                      </label>
+                      <label>
+                        Due date
+                        <input type="date" value={medicalAssessmentForm.deadline} onChange={(event) => updateMedicalAssessmentField('deadline', event.target.value)} />
+                      </label>
+                      <label>
+                        Delivery
+                        <select value={medicalAssessmentForm.delivery_method} onChange={(event) => updateMedicalAssessmentField('delivery_method', event.target.value)}>
+                          <option value="link">Secure link</option>
+                          <option value="email">Email</option>
+                          <option value="sms">SMS</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="modal-actions">
+                      <button className="secondary-button" type="button" onClick={closeMedicalAssessment}>Cancel</button>
+                      <button className="primary-button" disabled={creatingMedicalAssessment}>
+                        {creatingMedicalAssessment ? <ButtonSpinner label="Creating..." /> : medicalAssessmentForm.delivery_method === 'link' ? <Copy size={17} /> : <Send size={17} />}
+                        {!creatingMedicalAssessment && (medicalAssessmentForm.delivery_method === 'link' ? 'Generate link' : 'Create request')}
+                      </button>
+                    </div>
+                  </form>
+
+                  <div className="medical-workflow-card">
+                    <div className="medical-access-heading">
+                      <h4>Doctor access</h4>
+                      <span>Limited</span>
+                    </div>
+                    <ul>
+                      <li>Secure link for one assigned patient.</li>
+                      <li>Patient and accident details only.</li>
+                      <li>Share link by email, SMS, or manually.</li>
+                      <li>Doctor completes, signs, and submits.</li>
+                    </ul>
+                    <p>Doctor link cannot open the firm database.</p>
+                  </div>
+
+                  {activeMedicalAssessmentRequest && (
+                    <div className="medical-request-summary">
+                      <span className="status-pill pending">{activeMedicalAssessmentRequest.status}</span>
+                      <div>
+                        <strong>{getMedicalReportTypeLabel(activeMedicalAssessmentRequest.report_type)}</strong>
                         <small>
-                          {medicalReportRequest.status} · {medicalReportRequest.upload_count || 0} upload(s)
-                          {medicalReportRequest.latest_upload_filename ? ` · ${medicalReportRequest.latest_upload_filename}` : ''}
+                          {activeMedicalAssessmentRequest.doctor_name}
+                          {activeMedicalAssessmentRequest.deadline ? ` · Due ${formatDisplayDate(activeMedicalAssessmentRequest.deadline)}` : ''}
                         </small>
                       </div>
-                      <div className="claim-form-picker-actions document-request-actions">
-                        <button
-                          className="claim-form-view-button"
-                          type="button"
-                          onClick={() => viewUpload(medicalReportRequest)}
-                          disabled={viewingRequestId === medicalReportRequest.id}
-                          title="View medical report"
-                          aria-label={`View ${medicalReportRequest.label}`}
-                        >
-                          {viewingRequestId === medicalReportRequest.id ? <LoadingSpinner size="sm" label="Opening medical report..." /> : 'View'}
-                        </button>
-                        <label className="claim-form-view-button" title="Upload medical report" aria-label="Upload medical report">
-                          {uploadingRequestId === medicalReportRequest.id ? <LoadingSpinner size="sm" label="Uploading medical report..." /> : 'Upload'}
-                          <input
-                            type="file"
-                            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
-                            disabled={uploadingRequestId === medicalReportRequest.id}
-                            onChange={(event) => {
-                              uploadDocument(medicalReportRequest, event.target.files?.[0]);
-                              event.target.value = '';
-                            }}
-                          />
-                        </label>
-                      </div>
+                      <button className="claim-form-view-button" type="button" onClick={() => copyMedicalAssessmentLink(activeMedicalAssessmentRequest)}>
+                        {copiedMedicalRequestId === activeMedicalAssessmentRequest.id ? 'Copied' : 'Copy link'}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1838,6 +2106,7 @@ export default function FirmClaimsPage() {
 	                        <strong>{form.template?.name || form.document?.file_name || 'Claim form'}</strong>
 	                        <small>{form.document?.file_name || form.status}</small>
 	                      </span>
+	                      <ClaimFormInputStatus form={form} />
 	                      <div className="claim-form-picker-actions">
 	                        <button
 	                          className="claim-form-view-button"
@@ -1880,6 +2149,16 @@ export default function FirmClaimsPage() {
 	                          aria-label={`Fill ${form.template?.name || 'attached template'} with AI`}
 	                        >
 	                          {fillingClaimFormId === form.id ? <LoadingSpinner size="sm" label="Filling document..." /> : <><Sparkles size={14} /> Fill with AI</>}
+	                        </button>
+	                        <button
+	                          className="claim-form-view-button danger-lite"
+	                          type="button"
+	                          onClick={() => setDeleteClaimFormTarget({ form, caseRecord: formFilesCase })}
+	                          disabled={deletingClaimFormId === form.id}
+	                          title="Remove attached template"
+	                          aria-label={`Remove ${form.template?.name || 'attached template'}`}
+	                        >
+	                          {deletingClaimFormId === form.id ? <LoadingSpinner size="sm" label="Removing template..." /> : <><Trash2 size={14} /> Delete</>}
 	                        </button>
 	                      </div>
 	                      {fillingClaimFormId === form.id && (
@@ -2031,7 +2310,7 @@ export default function FirmClaimsPage() {
 	                      <div className="panel-header claim-form-section-header">
 	                        <div>
 	                          <h3>Attached forms</h3>
-	                          <p>View the generated files already attached to this claim.</p>
+	                          <p>Generated files attached to this claim.</p>
 	                        </div>
 	                        <span>{claimFormsPayload.attached_forms.length}</span>
 	                      </div>
@@ -2044,6 +2323,7 @@ export default function FirmClaimsPage() {
 	                              <strong>{form.template?.name || form.document?.file_name || 'Claim form'}</strong>
 	                              <small>{form.document?.file_name || form.status} · {new Date(form.created_at).toLocaleDateString()}</small>
 	                            </span>
+	                            <ClaimFormCompactInputStatus form={form} />
 	                            <div className="document-request-actions">
 	                              <button
 	                                className="claim-form-view-button"
@@ -2054,6 +2334,16 @@ export default function FirmClaimsPage() {
 	                                aria-label={`View ${form.template?.name || 'attached form'}`}
 	                              >
 	                                {previewingClaimFormId === form.id ? <LoadingSpinner size="sm" label="Opening form..." /> : 'Claim Form'}
+	                              </button>
+	                              <button
+	                                className="claim-form-view-button danger-lite"
+	                                type="button"
+	                                onClick={() => setDeleteClaimFormTarget({ form, caseRecord: claimFormsCase })}
+	                                disabled={deletingClaimFormId === form.id}
+	                                title="Remove attached template"
+	                                aria-label={`Remove ${form.template?.name || 'attached template'}`}
+	                              >
+	                                {deletingClaimFormId === form.id ? <LoadingSpinner size="sm" label="Removing template..." /> : <Trash2 size={14} />}
 	                              </button>
 	                            </div>
 	                          </div>
@@ -2097,6 +2387,53 @@ export default function FirmClaimsPage() {
 
 		                  </div>
 	                )}
+	              </section>
+	            </div>
+	          )}
+	          {deleteClaimFormTarget && (
+	            <div className="modal-backdrop" role="presentation">
+	              <section className="modal-panel confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-attached-template-title">
+	                <div className="modal-header">
+	                  <div>
+	                    <h3 id="delete-attached-template-title">Remove attached template</h3>
+	                    <p>This removes the generated template file from this claim. You can attach it again later if needed.</p>
+	                  </div>
+	                  <button
+	                    className="icon-button ghost"
+	                    type="button"
+	                    onClick={() => setDeleteClaimFormTarget(null)}
+	                    disabled={deletingClaimFormId === deleteClaimFormTarget.form.id}
+	                    aria-label="Close remove template confirmation"
+	                  >
+	                    <X size={18} />
+	                  </button>
+	                </div>
+	                <div className="confirm-dialog-body">
+	                  <strong>{deleteClaimFormTarget.form.template?.name || deleteClaimFormTarget.form.document?.file_name || 'Attached template'}</strong>
+	                  <span>
+	                    {deleteClaimFormTarget.caseRecord.first_name} {deleteClaimFormTarget.caseRecord.surname}
+	                    {deleteClaimFormTarget.form.document?.file_name ? ` · ${deleteClaimFormTarget.form.document.file_name}` : ''}
+	                  </span>
+	                </div>
+	                <div className="modal-actions">
+	                  <button
+	                    className="secondary-button"
+	                    type="button"
+	                    onClick={() => setDeleteClaimFormTarget(null)}
+	                    disabled={deletingClaimFormId === deleteClaimFormTarget.form.id}
+	                  >
+	                    Cancel
+	                  </button>
+	                  <button
+	                    className="danger-button"
+	                    type="button"
+	                    onClick={confirmDeleteAttachedClaimForm}
+	                    disabled={deletingClaimFormId === deleteClaimFormTarget.form.id}
+	                  >
+	                    {deletingClaimFormId === deleteClaimFormTarget.form.id ? <ButtonSpinner label="Removing..." /> : <Trash2 size={17} />}
+	                    {deletingClaimFormId !== deleteClaimFormTarget.form.id && 'Remove template'}
+	                  </button>
+	                </div>
 	              </section>
 	            </div>
 	          )}

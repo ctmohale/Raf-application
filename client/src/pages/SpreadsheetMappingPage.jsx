@@ -97,14 +97,14 @@ export default function SpreadsheetMappingPage() {
                 <h3>{preview.sheetName}</h3>
                 <span>{preview.rowCount} rows</span>
               </div>
-              <table>
+              <table className="responsive-preview-table">
                 <thead>
                   <tr>{preview.columns.map((column) => <th key={column}>{column}</th>)}</tr>
                 </thead>
                 <tbody>
                   {preview.sampleRows.map((row, index) => (
                     <tr key={index}>
-                      {preview.columns.map((column) => <td key={column}>{String(row[column] ?? '')}</td>)}
+                      {preview.columns.map((column) => <td key={column} data-label={column}>{String(row[column] ?? '')}</td>)}
                     </tr>
                   ))}
                 </tbody>

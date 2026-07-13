@@ -12,6 +12,7 @@ import {
   Trash2,
   X
 } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
@@ -25,6 +26,7 @@ const emptyForm = {
 };
 
 export default function FirmsPage() {
+  const [searchParams] = useSearchParams();
   const [firms, setFirms] = useState([]);
   const [summary, setSummary] = useState({ total: 0, active: 0, suspended: 0 });
   const [form, setForm] = useState(emptyForm);
@@ -51,6 +53,10 @@ export default function FirmsPage() {
       .catch((err) => setError(err.message))
       .finally(() => setPageLoading(false));
   }, []);
+
+  useEffect(() => {
+    setSearchTerm(searchParams.get('q') || '');
+  }, [searchParams]);
 
   const filteredFirms = firms.filter((firm) => {
     const searchText = [
@@ -299,18 +305,18 @@ export default function FirmsPage() {
               <tbody>
                 {filteredFirms.map((firm) => (
                   <tr key={firm.id}>
-                    <td>
+                    <td data-label="Firm">
                       <strong>{firm.name}</strong>
                       <span>{firm.slug}</span>
                     </td>
-                    <td>{firm.contact_name || '-'}</td>
-                    <td>{firm.contact_email || '-'}</td>
-                    <td>{firm.contact_phone || '-'}</td>
-                    <td>{firm.address || '-'}</td>
-                    <td><span className={`status-pill ${firm.status}`}>{firm.status}</span></td>
-                    <td><code>{firm.database_filename}</code></td>
-                    <td>{new Date(firm.created_at).toLocaleDateString()}</td>
-                    <td>
+                    <td data-label="Contact person">{firm.contact_name || '-'}</td>
+                    <td data-label="Email">{firm.contact_email || '-'}</td>
+                    <td data-label="Phone">{firm.contact_phone || '-'}</td>
+                    <td data-label="Address">{firm.address || '-'}</td>
+                    <td data-label="Status"><span className={`status-pill ${firm.status}`}>{firm.status}</span></td>
+                    <td data-label="Database"><code>{firm.database_filename}</code></td>
+                    <td data-label="Created">{new Date(firm.created_at).toLocaleDateString()}</td>
+                    <td data-label="Action">
                       <div className="table-actions">
                         <a
                           href={`/firm/${firm.slug}/workspace`}

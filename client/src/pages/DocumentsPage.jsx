@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Download, Eye, FileCheck2, FileText, Filter, Search, Table2 } from 'lucide-react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest, downloadDocument } from '../lib/api.js';
 
 export default function DocumentsPage() {
   const { id: firmId } = useParams();
+  const [searchParams] = useSearchParams();
   const isFirmDocuments = Boolean(firmId);
   const [documents, setDocuments] = useState([]);
   const [firm, setFirm] = useState(null);
@@ -25,6 +26,10 @@ export default function DocumentsPage() {
       .catch((err) => setError(err.message))
       .finally(() => setPageLoading(false));
   }, [firmId, isFirmDocuments]);
+
+  useEffect(() => {
+    setSearchTerm(searchParams.get('q') || '');
+  }, [searchParams]);
 
   const sourceTypes = [...new Set(documents.map((doc) => doc.source_type))];
   const filteredDocuments = documents.filter((doc) => {
@@ -143,15 +148,15 @@ export default function DocumentsPage() {
               <tbody>
                 {filteredDocuments.map((doc) => (
                   <tr key={doc.id}>
-                    <td>
+                    <td data-label="Document">
                       <strong>{doc.file_name}</strong>
                       <span>Document #{doc.id}</span>
                     </td>
-                    <td>{doc.template_name}</td>
-                    <td>{doc.source_type}</td>
-                    <td>{new Date(doc.created_at).toLocaleString()}</td>
-                    <td><span className={`status-pill ${doc.status}`}>{doc.status}</span></td>
-                    {!isFirmDocuments && <td>
+                    <td data-label="Template">{doc.template_name}</td>
+                    <td data-label="Source">{doc.source_type}</td>
+                    <td data-label="Generated">{new Date(doc.created_at).toLocaleString()}</td>
+                    <td data-label="Status"><span className={`status-pill ${doc.status}`}>{doc.status}</span></td>
+                    {!isFirmDocuments && <td data-label="Actions">
                       <div className="table-actions">
                         <Link to={`/documents/${doc.id}`} title="Preview document" aria-label={`Preview ${doc.file_name}`}>
                           <Eye size={15} />

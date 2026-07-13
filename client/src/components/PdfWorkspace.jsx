@@ -146,6 +146,18 @@ function newField(pageNumber, x, y, count, patch = {}) {
   };
 }
 
+function newCheckboxField(pageNumber, x, y, count) {
+  return newField(pageNumber, x, y, count, {
+    label: `Checkbox ${count + 1}`,
+    name: `checkbox_${count + 1}`,
+    width: 18,
+    height: 18,
+    field_type: 'checkbox',
+    default_value: '',
+    options: [{ kind: 'checkbox-mark-style', value: 'x' }]
+  });
+}
+
 function formatPreviewValue(value) {
   if (Array.isArray(value)) return value.filter((item) => String(item ?? '').trim() !== '').join(', ');
   if (value === true) return 'Yes';
@@ -296,11 +308,23 @@ function PdfPage({
   }, [page, textTileMode]);
 
   function handleAdd(event) {
-    if (readOnly || mode !== 'add') return;
+    if (readOnly || !['add', 'checkbox'].includes(mode)) return;
     const rect = event.currentTarget.getBoundingClientRect();
+    if (mode === 'checkbox') {
+      const size = 18;
+      const x = clamp((event.clientX - rect.left) / scale, 0, width - size);
+      const y = clamp((event.clientY - rect.top) / scale, 0, height - size);
+      const field = newCheckboxField(pageNumber, x, y, fields.length);
+      onFieldsChange([...fields, field]);
+      onSelectField(field.id);
+      return;
+    }
+
     const x = clamp((event.clientX - rect.left) / scale, 0, width - 170);
     const y = clamp((event.clientY - rect.top) / scale, 0, height - 30);
-    onFieldsChange([...fields, newField(pageNumber, x, y, fields.length)]);
+    const field = newField(pageNumber, x, y, fields.length);
+    onFieldsChange([...fields, field]);
+    onSelectField(field.id);
   }
 
   function handleTextField(event, item) {
@@ -431,7 +455,7 @@ function PdfPage({
     <div className="pdf-page-wrap" style={{ width: width * scale }}>
       <div className="page-number">Page {pageNumber}</div>
       <div
-        className={`pdf-page ${mode === 'add' && !readOnly ? 'adding' : ''} ${textPickMode ? 'text-pick' : ''}`}
+        className={`pdf-page ${['add', 'checkbox'].includes(mode) && !readOnly ? 'adding' : ''} ${textPickMode ? 'text-pick' : ''}`}
         style={{ width: width * scale, height: height * scale }}
         onClick={handleAdd}
       >
@@ -472,7 +496,8 @@ function PdfPage({
           const signatureImage = readOnly && isSignatureField(field) && isDataImageValue(rawValue);
           const groupedField = field.field_type === 'repeatable';
           const groupedLines = groupedField ? groupedPreviewLines(rawValue) : [];
-          const fieldClasses = `field-box ${selected ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${readOnly ? 'readonly' : ''} ${entryMode ? 'entry-field' : ''} ${hasValue ? 'filled' : ''} ${signatureClass} ${groupedField ? 'grouped-field' : ''}`;
+          const medicalBlocked = Boolean(field.medical_blocked);
+          const fieldClasses = `field-box ${selected ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${readOnly ? 'readonly' : ''} ${entryMode ? 'entry-field' : ''} ${hasValue ? 'filled' : ''} ${signatureClass} ${groupedField ? 'grouped-field' : ''} ${medicalBlocked ? 'medical-blocked' : ''}`;
           const fieldStyle = {
             left: field.x * scale,
             top: field.y * scale,
@@ -497,6 +522,7 @@ function PdfPage({
                     className="pdf-entry-checkbox"
                     type="checkbox"
                     checked={Boolean(entryValue)}
+                    disabled={medicalBlocked}
                     onChange={(event) => onEntryValueChange?.(field, event.target.checked)}
                     aria-label={field.label}
                   />
@@ -504,6 +530,7 @@ function PdfPage({
                   <select
                     id={inputId}
                     value={entryValue || ''}
+                    disabled={medicalBlocked}
                     onChange={(event) => onEntryValueChange?.(field, event.target.value)}
                     aria-label={field.label}
                   >
@@ -514,6 +541,7 @@ function PdfPage({
                   <button
                     className={`pdf-entry-signature-button ${signatureDataImage ? 'has-signature' : ''}`}
                     type="button"
+                    disabled={medicalBlocked}
                     onClick={() => onEntryValueChange?.(field, '__open_signature_pad__')}
                     title={signatureDataImage ? `Edit ${field.label}` : `Draw ${field.label}`}
                     aria-label={signatureDataImage ? `Edit ${field.label}` : `Draw ${field.label}`}
@@ -525,11 +553,13 @@ function PdfPage({
                     id={inputId}
                     {...inputProps}
                     value={entryValue || ''}
+                    disabled={medicalBlocked}
                     onChange={(event) => onEntryValueChange?.(field, event.target.value)}
                     aria-label={field.label}
                     placeholder={field.label}
                   />
                 )}
+                {medicalBlocked && <span className="medical-blocked-mask">Medical section blocked</span>}
               </div>
             );
           }
@@ -574,6 +604,11 @@ function PdfPage({
         {mode === 'add' && !readOnly && (
           <div className="add-cursor">
             <Plus size={15} /> Click to add field
+          </div>
+        )}
+        {mode === 'checkbox' && !readOnly && (
+          <div className="add-cursor">
+            <Plus size={15} /> Click to add checkbox
           </div>
         )}
         {mode === 'text' && !readOnly && (

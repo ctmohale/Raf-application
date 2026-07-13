@@ -12,6 +12,13 @@ import { getTemplateFields } from '../services/templateAccess.js';
 
 export const firmsRouter = express.Router();
 
+const medicalReportTypes = new Map([
+  ['raf_1_medical_section', 'RAF 1 medical section'],
+  ['raf_4_serious_injury', 'RAF 4 serious-injury assessment'],
+  ['supporting_medical_report', 'General supporting medical report'],
+  ['specialist_report', 'Additional specialist report']
+]);
+
 function serializeFirm(row) {
   return {
     id: row.id,
@@ -238,6 +245,17 @@ function getWorkspacePayload(firm, req) {
       LIMIT 50
     `).all();
 
+    const medicalAssessmentRequests = firmDb.prepare(`
+      SELECT
+        medical_assessment_requests.*,
+        firm_clients.first_name,
+        firm_clients.surname
+      FROM medical_assessment_requests
+      JOIN firm_clients ON firm_clients.id = medical_assessment_requests.client_id
+      ORDER BY medical_assessment_requests.created_at DESC
+      LIMIT 50
+    `).all().map(serializeMedicalAssessmentRequest);
+
     const stats = {
       clients: firmDb.prepare('SELECT COUNT(*) AS count FROM firm_clients').get().count,
       openCases: firmDb.prepare("SELECT COUNT(*) AS count FROM raf_cases WHERE status != 'closed'").get().count,
@@ -253,6 +271,7 @@ function getWorkspacePayload(firm, req) {
       clients,
       cases,
       documentRequests,
+      medicalAssessmentRequests,
       claimForms: getClaimFormAttachments(firmDb)
     };
   } finally {
@@ -268,7 +287,6 @@ function createDefaultDocumentRequests(firmDb, clientId, caseId, context = {}) {
     ['proof_of_address', 'Proof of residential address'],
     ['police_accident_report', 'Police accident report'],
     ['police_case_information', 'Police case information'],
-    ['medical_report', 'Medical report'],
     ['hospital_records', 'Hospital records'],
     ['banking_proof', 'Proof of banking details'],
     ['power_of_attorney', 'Power of attorney'],
@@ -445,6 +463,14 @@ function serializeClaimFormAttachment(row) {
     ...row,
     template: template ? serializeTemplate(template) : null,
     document: document ? serializeDocument(document) : null
+  };
+}
+
+function serializeMedicalAssessmentRequest(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    secure_url: `${config.clientOrigin.replace(/\/$/, '')}/medical-assessment/${row.secure_token}`
   };
 }
 
@@ -851,6 +877,86 @@ firmsRouter.get('/:id/claims/:caseId/forms', (req, res) => {
       claim,
       available_templates: getAvailableClaimTemplates(),
       attached_forms: getClaimFormAttachments(firmDb, claim.id)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.post('/:id/claims/:caseId/medical-assessments', async (req, res) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const reportType = cleanString(req.body?.report_type) || 'supporting_medical_report';
+  const doctorName = cleanString(req.body?.doctor_name);
+  const practiceNumber = cleanString(req.body?.practice_number);
+  const doctorEmail = cleanString(req.body?.doctor_email);
+  const doctorPhone = cleanString(req.body?.doctor_phone);
+  const deadline = cleanString(req.body?.deadline);
+  const deliveryMethod = cleanString(req.body?.delivery_method) || 'link';
+
+  if (!medicalReportTypes.has(reportType)) return res.status(400).json({ error: 'Choose a valid medical report type' });
+  if (!doctorName) return res.status(400).json({ error: 'Doctor name is required' });
+  if (deliveryMethod !== 'link' && !doctorEmail && !doctorPhone) return res.status(400).json({ error: 'Doctor email or phone is required' });
+  if (!['link', 'email', 'sms'].includes(deliveryMethod)) return res.status(400).json({ error: 'Choose link, email, or SMS delivery' });
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const claim = getClaimWithClient(firmDb, req.params.caseId);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+
+    const token = randomUUID();
+    const result = firmDb.prepare(`
+      INSERT INTO medical_assessment_requests
+        (case_id, client_id, report_type, doctor_name, practice_number, doctor_email, doctor_phone, deadline, delivery_method, secure_token, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested')
+    `).run(
+      claim.id,
+      claim.client_id,
+      reportType,
+      doctorName,
+      practiceNumber || null,
+      doctorEmail || null,
+      doctorPhone || null,
+      deadline || null,
+      deliveryMethod,
+      token
+    );
+
+    let request = serializeMedicalAssessmentRequest(firmDb.prepare('SELECT * FROM medical_assessment_requests WHERE id = ?').get(result.lastInsertRowid));
+    let delivery = { sent: false, method: deliveryMethod };
+
+    if (deliveryMethod === 'email' && doctorEmail) {
+      try {
+        await sendPowerMail({
+          to: doctorEmail,
+          subject: `${firm.name}: ${medicalReportTypes.get(reportType)} request`,
+          body: `Hi ${doctorName},\n\n${firm.name} has requested a ${medicalReportTypes.get(reportType)} for ${claim.first_name} ${claim.surname}.\n\nSecure link: ${request.secure_url}\n\nThis link is limited to this assigned patient assessment.\n\nRegards\n${firm.name}`,
+          data: {
+            message_type: 'medical_assessment_request',
+            firm_name: firm.name,
+            doctor_name: doctorName,
+            patient_name: `${claim.first_name} ${claim.surname}`,
+            report_type: medicalReportTypes.get(reportType),
+            secure_link: request.secure_url
+          }
+        });
+        firmDb.prepare(`
+          UPDATE medical_assessment_requests
+          SET status = 'sent', sent_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(request.id);
+        request = serializeMedicalAssessmentRequest(firmDb.prepare('SELECT * FROM medical_assessment_requests WHERE id = ?').get(request.id));
+        delivery = { sent: true, method: deliveryMethod };
+      } catch (error) {
+        delivery = { sent: false, method: deliveryMethod, error: error.message };
+      }
+    }
+
+    return res.status(201).json({
+      request,
+      delivery,
+      workspace: getWorkspacePayload(firm, req)
     });
   } finally {
     firmDb.close();

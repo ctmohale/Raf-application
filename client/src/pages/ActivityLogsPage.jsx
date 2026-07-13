@@ -8,6 +8,7 @@ import {
   ServerCrash,
   ShieldAlert
 } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { PageLoader } from '../components/LoadingSpinner.jsx';
 import { apiRequest } from '../lib/api.js';
@@ -43,6 +44,7 @@ function formatMetadata(metadata) {
 }
 
 export default function ActivityLogsPage() {
+  const [searchParams] = useSearchParams();
   const [payload, setPayload] = useState(null);
   const [level, setLevel] = useState('all');
   const [firmId, setFirmId] = useState('all');
@@ -74,6 +76,10 @@ export default function ActivityLogsPage() {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    setSearchTerm(searchParams.get('q') || '');
+  }, [searchParams]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {

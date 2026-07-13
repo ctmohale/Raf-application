@@ -199,6 +199,26 @@ export function initializeFirmDatabase(firm) {
         UNIQUE(case_id, template_id)
       );
 
+      CREATE TABLE IF NOT EXISTS medical_assessment_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER NOT NULL,
+        client_id INTEGER NOT NULL,
+        report_type TEXT NOT NULL,
+        doctor_name TEXT NOT NULL,
+        practice_number TEXT,
+        doctor_email TEXT,
+        doctor_phone TEXT,
+        deadline TEXT,
+        delivery_method TEXT NOT NULL DEFAULT 'email',
+        secure_token TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'requested',
+        sent_at TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (case_id) REFERENCES raf_cases(id) ON DELETE CASCADE,
+        FOREIGN KEY (client_id) REFERENCES firm_clients(id) ON DELETE CASCADE
+      );
+
       CREATE INDEX IF NOT EXISTS idx_templates_user ON document_templates(user_id);
       CREATE INDEX IF NOT EXISTS idx_fields_template ON template_fields(template_id);
       CREATE INDEX IF NOT EXISTS idx_docs_user ON generated_documents(user_id);
@@ -211,6 +231,8 @@ export function initializeFirmDatabase(firm) {
       CREATE INDEX IF NOT EXISTS idx_email_logs_client ON client_email_logs(client_id);
       CREATE INDEX IF NOT EXISTS idx_claim_forms_case ON claim_form_templates(case_id);
       CREATE INDEX IF NOT EXISTS idx_claim_forms_template ON claim_form_templates(template_id);
+      CREATE INDEX IF NOT EXISTS idx_medical_assessments_case ON medical_assessment_requests(case_id);
+      CREATE INDEX IF NOT EXISTS idx_medical_assessments_token ON medical_assessment_requests(secure_token);
     `);
 
     const clientColumns = firmDb.prepare('PRAGMA table_info(firm_clients)').all().map((column) => column.name);
@@ -257,6 +279,16 @@ export function initializeFirmDatabase(firm) {
     addCaseColumn('deadline_status', "TEXT NOT NULL DEFAULT 'attorney_review_required'");
     addCaseColumn('lawyer_review_status', "TEXT NOT NULL DEFAULT 'not_reviewed'");
     addCaseColumn('original_tracking_json', 'TEXT');
+
+    const medicalAssessmentColumns = firmDb.prepare('PRAGMA table_info(medical_assessment_requests)').all().map((column) => column.name);
+    const addMedicalAssessmentColumn = (name, definition) => {
+      if (!medicalAssessmentColumns.includes(name)) {
+        firmDb.prepare(`ALTER TABLE medical_assessment_requests ADD COLUMN ${name} ${definition}`).run();
+      }
+    };
+
+    addMedicalAssessmentColumn('assessment_json', 'TEXT');
+    addMedicalAssessmentColumn('submitted_at', 'TEXT');
 
     firmDb.exec(`
       CREATE INDEX IF NOT EXISTS idx_clients_next_reminder ON firm_clients(next_reminder_at);

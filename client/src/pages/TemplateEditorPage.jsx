@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Combine, Highlighter, Save, Trash2, Ungroup } from 'lucide-react';
+import { CheckSquare, Combine, Highlighter, Save, Search, Trash2, Ungroup } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
@@ -18,6 +18,20 @@ const fieldTypes = [
 
 function fieldTypeLabel(type) {
   return fieldTypes.find((fieldType) => fieldType.value === type)?.label || type;
+}
+
+function getCheckboxMarkStyle(field) {
+  const option = Array.isArray(field?.options)
+    ? field.options.find((item) => item && item.kind === 'checkbox-mark-style')
+    : null;
+  return option?.value === 'check' ? 'check' : 'x';
+}
+
+function setCheckboxMarkStyle(field, value) {
+  const existingOptions = Array.isArray(field?.options) ? field.options : [];
+  const nextOptions = existingOptions.filter((item) => item?.kind !== 'checkbox-mark-style');
+  nextOptions.push({ kind: 'checkbox-mark-style', value });
+  return nextOptions;
 }
 
 function normalizeName(label, existingFields, fallback) {
@@ -87,6 +101,7 @@ export default function TemplateEditorPage() {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [groupSelectionIds, setGroupSelectionIds] = useState([]);
+  const [fieldSearch, setFieldSearch] = useState('');
 
   useEffect(() => {
     apiRequest(`/api/templates/${id}`)
@@ -106,6 +121,17 @@ export default function TemplateEditorPage() {
     () => fields.filter((field) => groupSelectionIds.includes(field.id)),
     [fields, groupSelectionIds]
   );
+  const filteredFields = useMemo(() => {
+    const searchValue = fieldSearch.trim().toLowerCase();
+    if (!searchValue) return fields;
+
+    return fields.filter((field) => [
+      field.label,
+      field.name,
+      field.field_type,
+      `page ${field.page_number}`
+    ].filter(Boolean).join(' ').toLowerCase().includes(searchValue));
+  }, [fields, fieldSearch]);
   const groupSelectionPage = groupSelection[0]?.page_number;
   const canGroupSelection = groupSelection.length >= 2 && groupSelection.every((field) => field.page_number === groupSelectionPage);
 
@@ -299,6 +325,7 @@ export default function TemplateEditorPage() {
             <div className="segmented compact">
               <button className={mode === 'select' ? 'active' : ''} onClick={() => setMode('select')}>Select</button>
               <button className={mode === 'add' ? 'active' : ''} onClick={() => setMode('add')}>Add field</button>
+              <button className={mode === 'checkbox' ? 'active' : ''} onClick={() => setMode('checkbox')}><CheckSquare size={15} /> Checkbox</button>
               <button className={mode === 'text' ? 'active' : ''} onClick={() => setMode('text')}><Highlighter size={15} /> Text field</button>
             </div>
             <button className="primary-button" onClick={saveFields} disabled={saving}>
@@ -322,9 +349,21 @@ export default function TemplateEditorPage() {
 
       <aside className="field-panel">
         <div className="panel-header">
-          <h3>Fields</h3>
-          <span>{fields.length}</span>
+          <div>
+            <span className="eyebrow">Field map</span>
+            <h3>Fields</h3>
+          </div>
+          <span className="field-count-badge">{fields.length}</span>
         </div>
+        <label className="field-search" aria-label="Search fields">
+          <Search size={15} />
+          <input
+            type="search"
+            placeholder="Search field, page, or type"
+            value={fieldSearch}
+            onChange={(event) => setFieldSearch(event.target.value)}
+          />
+        </label>
         <div className="field-group-tools">
           <button className="secondary-button compact-button" type="button" onClick={groupSelectedFields} disabled={!canGroupSelection}>
             <Combine size={15} /> Group selected
@@ -335,7 +374,7 @@ export default function TemplateEditorPage() {
           <small>{groupSelection.length} selected</small>
         </div>
         <div className="field-list">
-          {fields.map((field) => (
+          {filteredFields.map((field) => (
             <div
               key={field.id}
               className={`field-list-row ${field.id === selectedFieldId ? 'active' : ''} ${groupSelectionIds.includes(field.id) ? 'selected-for-group' : ''}`}
@@ -360,10 +399,15 @@ export default function TemplateEditorPage() {
               </button>
             </div>
           ))}
+          {filteredFields.length === 0 && <p className="field-list-empty">No matching fields.</p>}
         </div>
 
         {selectedField ? (
           <div className="field-form">
+            <div className="field-form-header">
+              <span className="eyebrow">Selected field</span>
+              <strong>{selectedField.label || selectedField.name}</strong>
+            </div>
             <label>
               Field name
               <input value={selectedField.name} onChange={(event) => updateSelected({ name: event.target.value })} />
@@ -406,6 +450,18 @@ export default function TemplateEditorPage() {
               Default value
               <input value={selectedField.default_value || ''} onChange={(event) => updateSelected({ default_value: event.target.value })} />
             </label>
+            {selectedField.field_type === 'checkbox' && (
+              <label>
+                Mark style
+                <select
+                  value={getCheckboxMarkStyle(selectedField)}
+                  onChange={(event) => updateSelected({ options: setCheckboxMarkStyle(selectedField, event.target.value) })}
+                >
+                  <option value="x">X mark</option>
+                  <option value="check">Check mark</option>
+                </select>
+              </label>
+            )}
             <label className="checkbox-line">
               <input type="checkbox" checked={Boolean(selectedField.required)} onChange={(event) => updateSelected({ required: event.target.checked })} />
               Required

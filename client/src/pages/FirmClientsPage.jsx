@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { BellRing, Copy, FileCheck2, Filter, Mail, Plus, Search, Send, UploadCloud, Users, X } from 'lucide-react';
-import { useParams } from 'react-router-dom';
+import { BellRing, BriefcaseBusiness, Copy, FileCheck2, Filter, Mail, Plus, Search, Send, UploadCloud, Users, X } from 'lucide-react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
@@ -23,6 +23,7 @@ const emptyEmail = {
 
 export default function FirmClientsPage() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
   const [workspace, setWorkspace] = useState(null);
   const [clientForm, setClientForm] = useState(emptyClient);
   const [clientModalOpen, setClientModalOpen] = useState(false);
@@ -43,6 +44,10 @@ export default function FirmClientsPage() {
   useEffect(() => {
     loadWorkspace().catch((err) => setError(err.message));
   }, [id]);
+
+  useEffect(() => {
+    setSearchTerm(searchParams.get('q') || '');
+  }, [searchParams]);
 
   function updateClientField(field, value) {
     setClientForm((current) => ({ ...current, [field]: value }));
@@ -175,6 +180,26 @@ export default function FirmClientsPage() {
           </div>
           <small>Received client files</small>
         </div>
+        <div className="metric">
+          <div className="firm-stat-top">
+            <span className="metric-icon"><BriefcaseBusiness size={22} /></span>
+            <strong>{workspace.stats.openCases}</strong>
+          </div>
+          <div className="metric-body">
+            <span>Open RAF cases</span>
+          </div>
+          <small>Active client applications</small>
+        </div>
+        <div className="metric">
+          <div className="firm-stat-top">
+            <span className="metric-icon"><UploadCloud size={22} /></span>
+            <strong>{workspace.stats.requestedDocuments}</strong>
+          </div>
+          <div className="metric-body">
+            <span>Pending docs</span>
+          </div>
+          <small>Outstanding client files</small>
+        </div>
       </div>
 
       <section className="panel">
@@ -232,22 +257,22 @@ export default function FirmClientsPage() {
               <tbody>
                 {filteredClients.map((client) => (
                   <tr key={client.id}>
-                    <td>
+                    <td data-label="Client">
                       <strong>{client.first_name} {client.surname}</strong>
                       <span>Added {new Date(client.created_at).toLocaleDateString()}</span>
                     </td>
-                    <td>{client.id_number}</td>
-                    <td>{client.cell}</td>
-                    <td>{client.email}</td>
-                    <td>{client.case_count}</td>
-                    <td>{client.uploaded_documents}/{client.requested_documents}</td>
-                    <td>
+                    <td data-label="ID number">{client.id_number}</td>
+                    <td data-label="Cell">{client.cell}</td>
+                    <td data-label="Email">{client.email}</td>
+                    <td data-label="Cases">{client.case_count}</td>
+                    <td data-label="Documents">{client.uploaded_documents}/{client.requested_documents}</td>
+                    <td data-label="Reminders">
                       <span className={`status-pill ${client.auto_reminders_enabled ? client.reminder_due ? 'warning' : 'active' : 'neutral'}`}>
                         {client.auto_reminders_enabled ? client.reminder_due ? 'Due' : 'On' : 'Off'}
                       </span>
                       {client.auto_reminders_enabled && <span>{client.reminder_time}</span>}
                     </td>
-	                    <td>
+	                    <td data-label="Actions">
 	                      <button type="button" onClick={() => openEmailModal(client)} title="Email client" aria-label={`Email ${client.first_name}`}>
 	                        <Mail size={15} />
 	                      </button>

@@ -13,6 +13,7 @@ import { clientPortalRouter } from './routes/clientPortal.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { documentsRouter } from './routes/documents.js';
 import { firmsRouter } from './routes/firms.js';
+import { medicalAssessmentsRouter } from './routes/medicalAssessments.js';
 import { templatesRouter } from './routes/templates.js';
 
 const app = express();
@@ -32,6 +33,7 @@ app.use('/api/billing', billingRouter);
 app.use('/api/client-portal', clientPortalRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/firms', firmsRouter);
+app.use('/api/medical-assessments', medicalAssessmentsRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/documents', documentsRouter);
 
