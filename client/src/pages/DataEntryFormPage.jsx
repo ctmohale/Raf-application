@@ -3,15 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
-
-function groupedInputCount(field, value) {
-  const filledLines = String(Array.isArray(value) ? value.join('\n') : value || '')
-    .split(/\r?\n/)
-    .filter((line) => line.trim() !== '')
-    .length;
-  const heightCount = Math.round(Number(field.height || 72) / 26);
-  return Math.max(filledLines, Math.max(2, Math.min(12, heightCount)));
-}
+import { distributeGroupedText, getGroupedFieldBoxes, getUpdatedGroupedInputValue, groupedInputCount, normalizeGroupedText } from '../lib/templateFieldHelpers.js';
 
 function inputForField(field, value, onChange) {
   if (field.field_type === 'checkbox') {
@@ -33,15 +25,13 @@ function inputForField(field, value, onChange) {
   }
 
   if (field.field_type === 'repeatable') {
-    const textValue = Array.isArray(value) ? value.join('\n') : String(value || '');
+    const textValue = normalizeGroupedText(value);
+    const groupedBoxes = getGroupedFieldBoxes(field);
     const inputCount = groupedInputCount(field, textValue);
-    const lines = textValue.split(/\r?\n/);
-    while (lines.length < inputCount) lines.push('');
+    const lines = distributeGroupedText(textValue, groupedBoxes, inputCount);
 
     function updateLine(index, nextValue) {
-      const nextLines = [...lines];
-      nextLines[index] = nextValue;
-      onChange(nextLines.join('\n'));
+      onChange(getUpdatedGroupedInputValue(textValue, index, nextValue, inputCount, groupedBoxes));
     }
 
     return (
@@ -49,9 +39,10 @@ function inputForField(field, value, onChange) {
         <span className="grouped-input-title">{field.label}{field.required ? ' *' : ''}</span>
         {lines.slice(0, inputCount).map((line, index) => (
           <label className="grouped-input-line" key={`${field.id}-${index}`}>
-            <span>{field.label} {index + 1}</span>
+            {index === 0 ? <span>{field.label}</span> : null}
             <input
               type="text"
+              aria-label={`${field.label} ${index + 1}`}
               value={line}
               onChange={(event) => updateLine(index, event.target.value)}
               required={field.required && index === 0}

@@ -265,7 +265,8 @@ function PdfPage({
   readOnly,
   values,
   minScale,
-  fitPadding
+  fitPadding,
+  zoom
 }) {
   const canvasRef = useRef(null);
   const [textItems, setTextItems] = useState([]);
@@ -277,8 +278,9 @@ function PdfPage({
   ), [pageFields, width]);
   const scale = useMemo(() => {
     const availableWidth = Math.max(1, containerWidth - fitPadding);
-    return clamp(availableWidth / effectiveWidth, minScale, 1.35);
-  }, [containerWidth, effectiveWidth, fitPadding, minScale]);
+    const baseScale = clamp(availableWidth / effectiveWidth, minScale, 1.35);
+    return clamp(baseScale * zoom, minScale * 0.75, 2.4);
+  }, [containerWidth, effectiveWidth, fitPadding, minScale, zoom]);
   const textPickMode = !entryMode && !readOnly && (mode === 'select' || mode === 'text');
 
   useEffect(() => {
@@ -511,12 +513,14 @@ function PdfPage({
           const groupedField = field.field_type === 'repeatable';
           const groupedLines = groupedField ? groupedPreviewLines(rawValue) : [];
           const locked = Boolean(field.locked) || hidden;
-          const fieldClasses = `field-box ${selected ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${readOnly ? 'readonly' : ''} ${entryMode ? 'entry-field' : ''} ${hasValue ? 'filled' : ''} ${signatureClass} ${groupedField ? 'grouped-field' : ''} ${locked ? 'locked-field' : ''} ${hidden ? 'hidden-field' : ''}`;
+          const sectionMarked = Boolean(field.section_title);
+          const fieldClasses = `field-box ${selected ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${readOnly ? 'readonly' : ''} ${entryMode ? 'entry-field' : ''} ${hasValue ? 'filled' : ''} ${signatureClass} ${groupedField ? 'grouped-field' : ''} ${locked ? 'locked-field' : ''} ${hidden ? 'hidden-field' : ''} ${sectionMarked ? 'section-marked-field' : ''}`;
           const fieldStyle = {
             left: field.x * scale,
             top: field.y * scale,
             width: field.width * scale,
-            height: field.height * scale
+            height: field.height * scale,
+            '--field-section-color': field.section_color || '#0f766e'
           };
 
           if (entryMode) {
@@ -667,7 +671,8 @@ export default function PdfWorkspace({
   readOnly = false,
   values = {},
   minScale = 0.65,
-  fitPadding = 36
+  fitPadding = 36,
+  zoom = 1
 }) {
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -726,6 +731,7 @@ export default function PdfWorkspace({
           values={values}
           minScale={minScale}
           fitPadding={fitPadding}
+          zoom={zoom}
         />
       ))}
     </div>

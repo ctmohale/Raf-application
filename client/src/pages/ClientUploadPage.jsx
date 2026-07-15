@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2, ChevronDown, CircleDashed, FileText, FileUp, FolderOpen, Maximize2, Minimize2, Save, UploadCloud, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CheckCircle2, ChevronDown, CircleDashed, FileText, FileUp, FolderOpen, Maximize2, Minimize2, Minus, Plus, Save, UploadCloud, X } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { ButtonSpinner } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
 import SignatureInput from '../components/SignatureInput.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
+import { buildTemplateInputPreview, getUpdatedGroupedInputValue, scaleGroupedBoxesForRenderedField } from '../lib/templateFieldHelpers.js';
 
 function isVisibleDocumentRequest(request) {
   return String(request?.label || '').trim().toLowerCase() !== 'medical report';
@@ -13,6 +14,22 @@ function isVisibleDocumentRequest(request) {
 
 function claimFormOptionLabel(form) {
   return `${form.template?.name || form.document?.file_name || 'Attached template'} - ${form.case_reference}`;
+}
+
+function hasTemplateInputValue(value) {
+  if (Array.isArray(value)) return value.some(hasTemplateInputValue);
+  if (value && typeof value === 'object') return Object.values(value).some(hasTemplateInputValue);
+  if (typeof value === 'boolean') return value;
+  return value != null && String(value).trim() !== '';
+}
+
+function templateValueKey(field) {
+  const label = String(field?.label || '').trim().toLowerCase();
+  const name = String(field?.name || '').trim().toLowerCase();
+  if (label.includes('signature') || name.includes('signature') || label === 'signed' || /^signed(_\d+)?$/.test(name)) {
+    return `${field.name}__field_${field.id}`;
+  }
+  return field.name;
 }
 
 function ClientPortalLoader() {
@@ -64,6 +81,7 @@ export default function ClientUploadPage() {
   const [loadingPortal, setLoadingPortal] = useState(true);
   const [collapsedCards, setCollapsedCards] = useState({});
   const [templateFullscreen, setTemplateFullscreen] = useState(false);
+  const [templateZoom, setTemplateZoom] = useState(1);
   const [editingSignatureField, setEditingSignatureField] = useState(null);
 
   async function loadPortal() {
@@ -90,7 +108,24 @@ export default function ClientUploadPage() {
       setEditingSignatureField(field);
       return;
     }
-    setClaimFormValues((current) => ({ ...current, [field.name]: value }));
+    const valueKey = field.source_value_key || field.name;
+    if (Number.isInteger(field.source_line_index)) {
+      setClaimFormValues((current) => {
+        const count = Math.max(Number(field.source_line_count || 0), field.source_line_index + 1);
+        return {
+          ...current,
+          [valueKey]: getUpdatedGroupedInputValue(
+            current[valueKey],
+            field.source_line_index,
+            value,
+            count,
+            scaleGroupedBoxesForRenderedField(field)
+          )
+        };
+      });
+      return;
+    }
+    setClaimFormValues((current) => ({ ...current, [valueKey]: value }));
   }
 
   function signatureValueKey(field) {
@@ -129,9 +164,30 @@ export default function ClientUploadPage() {
   const activeClaimForm = claimForms.find((form) => String(form.id) === String(activeClaimFormId)) || null;
   const canViewTemplates = portal?.portal_permissions?.template_view_enabled !== false;
   const canEditTemplates = canViewTemplates && portal?.portal_permissions?.template_inputs_enabled !== false;
+  const activeTemplatePreview = useMemo(() => (
+    activeClaimForm?.template
+      ? buildTemplateInputPreview(activeClaimForm.template.fields || [], claimFormValues)
+      : { fields: [], values: claimFormValues }
+  ), [activeClaimForm?.id, activeClaimForm?.template, claimFormValues]);
+  const templateProgress = useMemo(() => {
+    const fields = activeClaimForm?.template?.fields || [];
+    const fillableFields = fields.filter((field) => field.field_type !== 'checkbox' || field.required);
+    const total = fillableFields.length;
+    const filled = fillableFields.filter((field) => {
+      const key = templateValueKey(field);
+      return hasTemplateInputValue(claimFormValues[key] ?? claimFormValues[field.name]);
+    }).length;
+    return {
+      filled,
+      total,
+      missing: Math.max(0, total - filled),
+      percent: total ? Math.round((filled / total) * 100) : 0
+    };
+  }, [activeClaimForm?.template, claimFormValues]);
 
   useEffect(() => {
     setClaimFormValues(activeClaimForm?.document?.input || {});
+    setTemplateZoom(1);
   }, [activeClaimForm?.id, activeClaimForm?.document?.id]);
 
   async function uploadDocument(requestId) {
@@ -215,6 +271,13 @@ export default function ClientUploadPage() {
                 <div>
                   <span className="eyebrow">Attached templates</span>
                   <h3>Claim forms</h3>
+                  {activeClaimForm?.template && (
+                    <div className="client-template-progress" aria-label={`${templateProgress.percent}% complete`}>
+                      <strong>{templateProgress.percent}%</strong>
+                      <span>{templateProgress.filled}/{templateProgress.total || 0} done</span>
+                      <em>{templateProgress.missing} missing</em>
+                    </div>
+                  )}
                 </div>
                 <div className="client-card-actions">
                   {claimForms.length > 0 && (
@@ -234,6 +297,37 @@ export default function ClientUploadPage() {
                       <Save size={17} />
                       {savingClaimForm ? <ButtonSpinner label="Saving..." /> : 'Save template'}
                     </button>
+                  )}
+                  {activeClaimForm?.template && !isCardCollapsed('templates') && (
+                    <div className="client-template-zoom" aria-label="Template zoom controls">
+                      <button
+                        className="icon-button ghost"
+                        type="button"
+                        onClick={() => setTemplateZoom((current) => Math.max(0.7, Number((current - 0.1).toFixed(2))))}
+                        aria-label="Zoom out"
+                        title="Zoom out"
+                      >
+                        <Minus size={16} />
+                      </button>
+                      <button
+                        className="template-zoom-value"
+                        type="button"
+                        onClick={() => setTemplateZoom(1)}
+                        aria-label="Reset zoom"
+                        title="Reset zoom"
+                      >
+                        {Math.round(templateZoom * 100)}%
+                      </button>
+                      <button
+                        className="icon-button ghost"
+                        type="button"
+                        onClick={() => setTemplateZoom((current) => Math.min(1.8, Number((current + 0.1).toFixed(2))))}
+                        aria-label="Zoom in"
+                        title="Zoom in"
+                      >
+                        <Plus size={16} />
+                      </button>
+                    </div>
                   )}
                   {activeClaimForm?.template && !isCardCollapsed('templates') && (
                     <button
@@ -267,16 +361,17 @@ export default function ClientUploadPage() {
                       <PdfWorkspace
                         className="client-fit-pdf-workspace"
                         pdfPath={`/api/client-portal/${token}/forms/${activeClaimForm.id}/template/pdf`}
-                        fields={activeClaimForm.template.fields || []}
+                        fields={activeTemplatePreview.fields}
                         onFieldsChange={() => {}}
                         selectedFieldId={null}
                         onSelectField={() => {}}
                         entryMode={canEditTemplates}
                         readOnly={!canEditTemplates}
                         onEntryValueChange={updateClaimFormField}
-                        values={claimFormValues}
+                        values={activeTemplatePreview.values}
                         minScale={0.25}
-                        fitPadding={28}
+                        fitPadding={8}
+                        zoom={templateZoom}
                       />
                     </div>
                   )}

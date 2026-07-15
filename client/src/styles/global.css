@@ -5806,6 +5806,33 @@ textarea:focus {
   line-height: 1.15;
 }
 
+.client-template-progress {
+  width: max-content;
+  max-width: 100%;
+  margin-top: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #f1f5f9;
+}
+
+.client-template-progress strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.client-template-progress span,
+.client-template-progress em {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 820;
+  white-space: nowrap;
+}
+
 .client-documents-header p {
   margin-top: 4px;
   color: var(--muted);
@@ -5825,6 +5852,41 @@ textarea:focus {
   width: 34px;
   min-height: 34px;
   border-radius: 12px;
+}
+
+.client-template-zoom {
+  display: inline-grid;
+  grid-template-columns: 34px minmax(48px, auto) 34px;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.client-template-zoom .icon-button {
+  width: 28px;
+  min-height: 28px;
+  border-radius: 9px;
+}
+
+.template-zoom-value {
+  min-height: 28px;
+  border: 0;
+  border-radius: 9px;
+  padding: 0 6px;
+  color: var(--ink);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.template-zoom-value:hover,
+.template-zoom-value:focus-visible {
+  background: var(--panel-strong);
+  outline: 0;
 }
 
 .client-collapse-button svg {
@@ -5894,7 +5956,7 @@ textarea:focus {
   min-width: 0;
   height: min(760px, 76dvh);
   min-height: 420px;
-  padding: 8px;
+  padding: 6px;
   border: 1px solid var(--line);
   border-radius: 12px;
   overflow: auto;
@@ -5914,7 +5976,7 @@ textarea:focus {
   border-radius: 0;
   box-sizing: border-box;
   align-content: start;
-  overflow-x: hidden;
+  overflow-x: visible;
   scrollbar-width: thin;
   scrollbar-color: #aeb8c6 transparent;
 }
@@ -6444,6 +6506,16 @@ textarea:focus {
   gap: 2px;
 }
 
+.field-box.section-marked-field {
+  border-color: color-mix(in srgb, var(--field-section-color, #0f766e) 82%, white);
+  background: color-mix(in srgb, var(--field-section-color, #0f766e) 15%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--field-section-color, #0f766e) 18%, transparent);
+}
+
+.field-box.section-marked-field.selected {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--field-section-color, #0f766e) 28%, transparent), 0 0 0 4px rgba(217, 95, 2, 0.16);
+}
+
 .field-box span {
   display: block;
   font-size: 11px;
@@ -6787,6 +6859,41 @@ textarea:focus {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.section-assign-control {
+  display: grid;
+  gap: 6px;
+}
+
+.section-assign-control > label {
+  color: #526071;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.section-assign-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.section-assign-control input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.section-assign-control input:focus {
+  outline: 0;
+  border-color: rgba(21, 147, 231, 0.38);
+  box-shadow: 0 0 0 3px rgba(21, 147, 231, 0.08);
 }
 
 .field-list-row {
@@ -7152,7 +7259,7 @@ th {
 
   .client-intake-form,
   .client-documents-panel {
-    padding: 14px;
+    padding: 10px;
   }
 
   .client-upload-header {
@@ -7169,15 +7276,26 @@ th {
   }
 
   .client-template-panel .client-documents-header {
+    position: sticky;
+    top: 4px;
+    z-index: 8;
     align-items: stretch;
     flex-direction: column;
+    margin: -4px -4px 0;
+    padding: 8px;
+    border: 1px solid rgba(226, 232, 240, 0.82);
+    border-radius: 13px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+    backdrop-filter: blur(10px);
   }
 
   .client-template-panel .client-card-actions {
     width: 100%;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
     align-items: center;
+    gap: 6px;
   }
 
   .client-template-panel .client-card-actions .client-template-picker {
@@ -7189,6 +7307,22 @@ th {
 
   .client-template-panel .client-card-actions .primary-button {
     width: 100%;
+  }
+
+  .client-template-zoom {
+    grid-template-columns: 30px minmax(44px, auto) 30px;
+    justify-self: start;
+  }
+
+  .client-template-body {
+    gap: 6px;
+  }
+
+  .client-template-preview {
+    height: min(720px, 72dvh);
+    min-height: 360px;
+    padding: 4px;
+    border-radius: 9px;
   }
 
   .share-link-permissions {
@@ -8228,13 +8362,66 @@ th {
 }
 
 @media (max-width: 520px) {
+  .client-upload-page {
+    padding: 6px;
+  }
+
   .client-upload-panel {
-    padding: 12px;
+    gap: 10px;
+    padding: 8px;
+    border-radius: 14px;
   }
 
   .client-intake-form,
   .client-documents-panel {
+    padding: 8px;
     border-radius: 16px;
+  }
+
+  .client-documents-header {
+    gap: 8px;
+  }
+
+  .client-template-panel .client-documents-header {
+    top: 2px;
+    margin: -3px -3px 0;
+    padding: 6px;
+    border-radius: 11px;
+  }
+
+  .client-documents-header h3 {
+    font-size: 14px;
+  }
+
+  .client-template-panel .client-card-actions {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 5px;
+  }
+
+  .client-template-zoom {
+    grid-column: 1 / span 2;
+    justify-self: start;
+  }
+
+  .client-template-panel .client-card-actions .primary-button {
+    min-height: 32px;
+    padding: 0 10px;
+  }
+
+  .client-template-picker {
+    min-height: 32px;
+    padding: 0 8px;
+  }
+
+  .client-template-preview {
+    height: min(700px, 74dvh);
+    min-height: 330px;
+    padding: 2px;
+    border-radius: 8px;
+  }
+
+  .client-template-preview .pdf-page-wrap {
+    margin-block: 4px;
   }
 
   .client-request-card {

@@ -34,6 +34,28 @@ function setCheckboxMarkStyle(field, value) {
   return nextOptions;
 }
 
+function getFieldSectionTitle(field) {
+  const option = Array.isArray(field?.options)
+    ? field.options.find((item) => item && item.kind === 'section-title')
+    : null;
+  return String(option?.value || '').trim();
+}
+
+function setFieldSectionTitle(field, value) {
+  const existingOptions = Array.isArray(field?.options) ? field.options : [];
+  const nextOptions = existingOptions.filter((item) => item?.kind !== 'section-title');
+  const title = String(value || '').trim();
+  if (title) nextOptions.push({ kind: 'section-title', value: title });
+  return nextOptions;
+}
+
+function sectionColor(title) {
+  const palette = ['#0f766e', '#2563eb', '#9333ea', '#c2410c', '#047857', '#be123c', '#7c3aed', '#0e7490'];
+  const text = String(title || '');
+  const hash = Array.from(text).reduce((total, char) => total + char.charCodeAt(0), 0);
+  return palette[hash % palette.length];
+}
+
 function normalizeName(label, existingFields, fallback) {
   const base = String(label || '')
     .trim()
@@ -102,6 +124,7 @@ export default function TemplateEditorPage() {
   const [saving, setSaving] = useState(false);
   const [groupSelectionIds, setGroupSelectionIds] = useState([]);
   const [fieldSearch, setFieldSearch] = useState('');
+  const [sectionDraft, setSectionDraft] = useState('');
 
   useEffect(() => {
     apiRequest(`/api/templates/${id}`)
@@ -132,6 +155,18 @@ export default function TemplateEditorPage() {
       `page ${field.page_number}`
     ].filter(Boolean).join(' ').toLowerCase().includes(searchValue));
   }, [fields, fieldSearch]);
+  const sectionTitles = useMemo(() => (
+    Array.from(new Set(fields.map(getFieldSectionTitle).filter(Boolean))).sort((a, b) => a.localeCompare(b))
+  ), [fields]);
+  const workspaceFields = useMemo(() => fields.map((field) => {
+    const sectionTitle = getFieldSectionTitle(field);
+    if (!sectionTitle) return field;
+    return {
+      ...field,
+      section_title: sectionTitle,
+      section_color: sectionColor(sectionTitle)
+    };
+  }), [fields]);
   const groupSelectionPage = groupSelection[0]?.page_number;
   const canGroupSelection = groupSelection.length >= 2 && groupSelection.every((field) => field.page_number === groupSelectionPage);
 
@@ -161,6 +196,22 @@ export default function TemplateEditorPage() {
     setGroupSelectionIds([]);
     setSelectedFieldId((current) => (selectedIds.has(current) ? null : current));
     setStatus(`Removed ${selectedIds.size} checked field${selectedIds.size === 1 ? '' : 's'}.`);
+    setError('');
+  }
+
+  function applySectionToCheckedFields(sectionTitle) {
+    if (groupSelectionIds.length === 0) {
+      setError('Check fields first, then apply a section title.');
+      return;
+    }
+    const selectedIds = new Set(groupSelectionIds);
+    setFields((current) => current.map((field) => (
+      selectedIds.has(field.id)
+        ? { ...field, options: setFieldSectionTitle(field, sectionTitle) }
+        : field
+    )));
+    setSectionDraft('');
+    setStatus(`Applied section to ${selectedIds.size} checked field${selectedIds.size === 1 ? '' : 's'}.`);
     setError('');
   }
 
@@ -337,7 +388,7 @@ export default function TemplateEditorPage() {
         <StatusMessage type="error">{error}</StatusMessage>
         <PdfWorkspace
           pdfPath={`/api/templates/${id}/pdf`}
-          fields={fields}
+          fields={workspaceFields}
           onFieldsChange={setFields}
           selectedFieldId={selectedFieldId}
           onSelectField={setSelectedField}
@@ -373,6 +424,35 @@ export default function TemplateEditorPage() {
           </button>
           <small>{groupSelection.length} selected</small>
         </div>
+        <div className="section-assign-control">
+          <label htmlFor="bulk-section-title">Section title for checked</label>
+          <div className="section-assign-row">
+            <input
+              id="bulk-section-title"
+              list="template-section-titles"
+              placeholder="e.g. Accident and Treatment"
+              value={sectionDraft}
+              onChange={(event) => setSectionDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  applySectionToCheckedFields(sectionDraft);
+                }
+              }}
+            />
+            <button
+              className="secondary-button compact-button"
+              type="button"
+              onClick={() => applySectionToCheckedFields(sectionDraft)}
+              disabled={groupSelection.length === 0}
+            >
+              Apply
+            </button>
+          </div>
+        </div>
+        <datalist id="template-section-titles">
+          {sectionTitles.map((title) => <option value={title} key={title} />)}
+        </datalist>
         <div className="field-list">
           {filteredFields.map((field) => (
             <div
@@ -395,6 +475,7 @@ export default function TemplateEditorPage() {
                 <small>
                   Page {field.page_number} · {fieldTypeLabel(field.field_type)}
                   {field.field_type === 'repeatable' ? <strong>Grouped input</strong> : null}
+                  {getFieldSectionTitle(field) ? <strong>{getFieldSectionTitle(field)}</strong> : null}
                 </small>
               </button>
             </div>
@@ -415,6 +496,15 @@ export default function TemplateEditorPage() {
             <label>
               Label
               <input value={selectedField.label} onChange={(event) => updateSelected({ label: event.target.value })} />
+            </label>
+            <label>
+              Section title
+              <input
+                list="template-section-titles"
+                placeholder="Group this field under a tile title"
+                value={getFieldSectionTitle(selectedField)}
+                onChange={(event) => updateSelected({ options: setFieldSectionTitle(selectedField, event.target.value) })}
+              />
             </label>
             <div className="form-grid">
               <label>

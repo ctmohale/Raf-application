@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronUp, FileText, Maximize2, Minimize2, Save, ShieldCheck } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { ButtonSpinner } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
+import { buildTemplateInputPreview, getUpdatedGroupedInputValue, scaleGroupedBoxesForRenderedField } from '../lib/templateFieldHelpers.js';
 
 const emptyAssessmentForm = {
   examination_date: '',
@@ -55,8 +56,31 @@ export default function MedicalAssessmentPage() {
       setMessage('Signature fields can be completed with the typed assessment values for now.');
       return;
     }
-    updateAssessmentField(field.name, value);
+    const valueKey = field.source_value_key || field.name;
+    if (Number.isInteger(field.source_line_index)) {
+      setAssessmentForm((current) => {
+        const count = Math.max(Number(field.source_line_count || 0), field.source_line_index + 1);
+        return {
+          ...current,
+          [valueKey]: getUpdatedGroupedInputValue(
+            current[valueKey],
+            field.source_line_index,
+            value,
+            count,
+            scaleGroupedBoxesForRenderedField(field)
+          )
+        };
+      });
+      return;
+    }
+    updateAssessmentField(valueKey, value);
   }
+
+  const templatePreview = useMemo(() => (
+    payload?.template
+      ? buildTemplateInputPreview(payload.template.fields || [], assessmentForm)
+      : { fields: [], values: assessmentForm }
+  ), [payload?.template, assessmentForm]);
 
   async function submitAssessment(event) {
     event.preventDefault();
@@ -200,13 +224,13 @@ export default function MedicalAssessmentPage() {
                 <div className="medical-template-preview">
                   <PdfWorkspace
                     pdfPath={`/api/medical-assessments/${token}/template/pdf`}
-                    fields={payload.template.fields || []}
+                    fields={templatePreview.fields}
                     onFieldsChange={() => {}}
                     selectedFieldId={null}
                     onSelectField={() => {}}
                     entryMode
                     onEntryValueChange={updateDocumentFieldValue}
-                    values={assessmentForm}
+                    values={templatePreview.values}
                   />
                 </div>
               ) : (
