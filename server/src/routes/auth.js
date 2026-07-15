@@ -5,6 +5,31 @@ import { signToken } from '../middleware/auth.js';
 
 export const authRouter = express.Router();
 
+function getUserFirmAccess(userId) {
+  return db.prepare(`
+    SELECT
+      user_firm_access.firm_id,
+      user_firm_access.access_level,
+      firms.name AS firm_name,
+      firms.slug AS firm_slug
+    FROM user_firm_access
+    JOIN firms ON firms.id = user_firm_access.firm_id
+    WHERE user_firm_access.user_id = ?
+    ORDER BY firms.name COLLATE NOCASE
+  `).all(userId);
+}
+
+function serializeAuthUser(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role,
+    status: row.status,
+    firm_access: getUserFirmAccess(row.id)
+  };
+}
+
 authRouter.post('/register', (req, res) => {
   const { name, email, password } = req.body || {};
   if (!name || !email || !password) {
@@ -18,14 +43,22 @@ authRouter.post('/register', (req, res) => {
   if (existing) return res.status(409).json({ error: 'Email is already registered' });
 
   const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
-  const role = userCount === 0 ? 'admin' : 'client';
+  const role = userCount === 0 ? 'admin' : 'staff';
+  const status = userCount === 0 ? 'active' : 'pending';
   const passwordHash = bcrypt.hashSync(password, 12);
   const result = db.prepare(`
-    INSERT INTO users (name, email, password_hash, role)
-    VALUES (?, ?, ?, ?)
-  `).run(name, String(email).toLowerCase(), passwordHash, role);
+    INSERT INTO users (name, email, password_hash, role, status, approved_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(name, String(email).toLowerCase(), passwordHash, role, status, status === 'active' ? new Date().toISOString() : null);
 
-  const user = db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(result.lastInsertRowid);
+  const user = serializeAuthUser(db.prepare('SELECT id, name, email, role, status FROM users WHERE id = ?').get(result.lastInsertRowid));
+  if (status !== 'active') {
+    return res.status(201).json({
+      user,
+      pendingApproval: true,
+      message: 'Account created. An administrator must approve your access before you can sign in.'
+    });
+  }
   return res.status(201).json({ user, token: signToken(user) });
 });
 
@@ -38,6 +71,14 @@ authRouter.post('/login', (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
-  const user = { id: row.id, name: row.name, email: row.email, role: row.role };
+  const isAdmin = row.role === 'admin';
+  if (!isAdmin && row.status === 'pending') {
+    return res.status(403).json({ error: 'Your account is waiting for admin approval' });
+  }
+  if (!isAdmin && row.status === 'suspended') {
+    return res.status(403).json({ error: 'Your account has been suspended by an administrator' });
+  }
+
+  const user = serializeAuthUser(row);
   return res.json({ user, token: signToken(user) });
 });

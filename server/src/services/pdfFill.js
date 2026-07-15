@@ -150,6 +150,12 @@ function parseDataImage(value) {
   };
 }
 
+function isOptionalClaimNumberField(field) {
+  const label = String(field?.label || '').trim().toLowerCase();
+  const name = String(field?.name || '').trim().toLowerCase();
+  return label.includes('claim number') || name.includes('claim_number') || name.includes('claimnumber');
+}
+
 export function validateDataAgainstFields(fields, data, { rejectUnknown = false } = {}) {
   const errors = [];
   const fieldNames = new Set(fields.map((field) => field.name));
@@ -157,7 +163,7 @@ export function validateDataAgainstFields(fields, data, { rejectUnknown = false 
 
   for (const field of fields) {
     const value = getFieldValue(field, data);
-    if (field.required && !hasValue(value)) {
+    if (field.required && !isOptionalClaimNumberField(field) && !hasValue(value)) {
       errors.push(`${field.label || field.name} is required`);
     }
   }

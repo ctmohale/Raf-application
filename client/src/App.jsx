@@ -17,6 +17,7 @@ import DataEntryFormPage from './pages/DataEntryFormPage.jsx';
 import ClientUploadPage from './pages/ClientUploadPage.jsx';
 import FirmClaimsPage from './pages/FirmClaimsPage.jsx';
 import FirmClientsPage from './pages/FirmClientsPage.jsx';
+import FirmDoctorsPage from './pages/FirmDoctorsPage.jsx';
 import FirmWorkspacePage from './pages/FirmWorkspacePage.jsx';
 
 function Protected({ children }) {
@@ -44,12 +45,14 @@ export default function App() {
       <Route path="/firms" element={<Protected><FirmsPage /></Protected>} />
       <Route path="/firms/:id/workspace" element={<Protected><FirmWorkspacePage /></Protected>} />
       <Route path="/firms/:id/clients" element={<Protected><FirmClientsPage /></Protected>} />
+      <Route path="/firms/:id/doctors" element={<Protected><FirmDoctorsPage /></Protected>} />
       <Route path="/firms/:id/claims" element={<Protected><FirmClaimsPage /></Protected>} />
       <Route path="/firms/:id/billing" element={<Protected><BillingPage /></Protected>} />
       <Route path="/firms/:id/templates" element={<Protected><FirmWorkspaceRedirect /></Protected>} />
       <Route path="/firms/:id/documents" element={<Protected><FirmWorkspaceRedirect /></Protected>} />
       <Route path="/firm/:id/workspace" element={<Protected><FirmWorkspacePage /></Protected>} />
       <Route path="/firm/:id/clients" element={<Protected><FirmClientsPage /></Protected>} />
+      <Route path="/firm/:id/doctors" element={<Protected><FirmDoctorsPage /></Protected>} />
       <Route path="/firm/:id/claims" element={<Protected><FirmClaimsPage /></Protected>} />
       <Route path="/firm/:id/billing" element={<Protected><BillingPage /></Protected>} />
       <Route path="/firm/:id/templates" element={<Protected><FirmWorkspaceRedirect /></Protected>} />

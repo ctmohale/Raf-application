@@ -234,14 +234,16 @@ function textItemBounds(page, item) {
 }
 
 function useContainerWidth(ref) {
-  const [width, setWidth] = useState(920);
+  const [width, setWidth] = useState(0);
   useEffect(() => {
     if (!ref.current) return undefined;
-    const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
+    const updateWidth = () => setWidth(ref.current?.clientWidth || 0);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
     observer.observe(ref.current);
     return () => observer.disconnect();
   }, [ref]);
-  return width;
+  return width || 920;
 }
 
 function PdfPage({
@@ -261,12 +263,22 @@ function PdfPage({
   entryMode,
   onEntryValueChange,
   readOnly,
-  values
+  values,
+  minScale,
+  fitPadding
 }) {
   const canvasRef = useRef(null);
   const [textItems, setTextItems] = useState([]);
   const [selectedTextKey, setSelectedTextKey] = useState('');
-  const scale = useMemo(() => clamp((containerWidth - 36) / width, 0.65, 1.35), [containerWidth, width]);
+  const pageFields = useMemo(() => fields.filter((field) => field.page_number === pageNumber), [fields, pageNumber]);
+  const effectiveWidth = useMemo(() => Math.max(
+    width,
+    ...pageFields.map((field) => Number(field.x || 0) + Number(field.width || 0) + 4)
+  ), [pageFields, width]);
+  const scale = useMemo(() => {
+    const availableWidth = Math.max(1, containerWidth - fitPadding);
+    return clamp(availableWidth / effectiveWidth, minScale, 1.35);
+  }, [containerWidth, effectiveWidth, fitPadding, minScale]);
   const textPickMode = !entryMode && !readOnly && (mode === 'select' || mode === 'text');
 
   useEffect(() => {
@@ -452,7 +464,7 @@ function PdfPage({
   }
 
   return (
-    <div className="pdf-page-wrap" style={{ width: width * scale }}>
+    <div className="pdf-page-wrap" style={{ width: effectiveWidth * scale }}>
       <div className="page-number">Page {pageNumber}</div>
       <div
         className={`pdf-page ${['add', 'checkbox'].includes(mode) && !readOnly ? 'adding' : ''} ${textPickMode ? 'text-pick' : ''}`}
@@ -484,9 +496,10 @@ function PdfPage({
             })}
           </div>
         )}
-        {fields.filter((field) => field.page_number === pageNumber).map((field) => {
+        {pageFields.filter((field) => entryMode || !field.hidden).map((field) => {
           const selected = selectedFieldId === field.id;
           const multiSelected = multiSelectedFieldIds.includes(field.id);
+          const hidden = Boolean(field.hidden);
           const rawValue = getFieldValue(field, values);
           const entryValue = entryValueForField(field, values);
           const previewValue = formatPreviewValue(rawValue);
@@ -496,8 +509,8 @@ function PdfPage({
           const signatureImage = readOnly && isSignatureField(field) && isDataImageValue(rawValue);
           const groupedField = field.field_type === 'repeatable';
           const groupedLines = groupedField ? groupedPreviewLines(rawValue) : [];
-          const medicalBlocked = Boolean(field.medical_blocked);
-          const fieldClasses = `field-box ${selected ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${readOnly ? 'readonly' : ''} ${entryMode ? 'entry-field' : ''} ${hasValue ? 'filled' : ''} ${signatureClass} ${groupedField ? 'grouped-field' : ''} ${medicalBlocked ? 'medical-blocked' : ''}`;
+          const locked = Boolean(field.locked) || hidden;
+          const fieldClasses = `field-box ${selected ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${readOnly ? 'readonly' : ''} ${entryMode ? 'entry-field' : ''} ${hasValue ? 'filled' : ''} ${signatureClass} ${groupedField ? 'grouped-field' : ''} ${locked ? 'locked-field' : ''} ${hidden ? 'hidden-field' : ''}`;
           const fieldStyle = {
             left: field.x * scale,
             top: field.y * scale,
@@ -509,6 +522,20 @@ function PdfPage({
             const inputId = `pdf-entry-${pageNumber}-${field.id}`;
             const inputProps = entryInputProps(field);
             const signatureDataImage = isSignatureField(field) && isDataImageValue(entryValue);
+            if (hidden) {
+              return (
+                <div
+                  key={field.id}
+                  className={fieldClasses}
+                  style={fieldStyle}
+                  title={`${field.label} is hidden from editing`}
+                >
+                  <div className="pdf-hidden-field-mask" aria-label={`${field.label} is hidden`}>
+                    <span>Hidden</span>
+                  </div>
+                </div>
+              );
+            }
             return (
               <div
                 key={field.id}
@@ -522,7 +549,7 @@ function PdfPage({
                     className="pdf-entry-checkbox"
                     type="checkbox"
                     checked={Boolean(entryValue)}
-                    disabled={medicalBlocked}
+                    disabled={locked}
                     onChange={(event) => onEntryValueChange?.(field, event.target.checked)}
                     aria-label={field.label}
                   />
@@ -530,7 +557,7 @@ function PdfPage({
                   <select
                     id={inputId}
                     value={entryValue || ''}
-                    disabled={medicalBlocked}
+                    disabled={locked}
                     onChange={(event) => onEntryValueChange?.(field, event.target.value)}
                     aria-label={field.label}
                   >
@@ -541,7 +568,7 @@ function PdfPage({
                   <button
                     className={`pdf-entry-signature-button ${signatureDataImage ? 'has-signature' : ''}`}
                     type="button"
-                    disabled={medicalBlocked}
+                    disabled={locked}
                     onClick={() => onEntryValueChange?.(field, '__open_signature_pad__')}
                     title={signatureDataImage ? `Edit ${field.label}` : `Draw ${field.label}`}
                     aria-label={signatureDataImage ? `Edit ${field.label}` : `Draw ${field.label}`}
@@ -553,13 +580,12 @@ function PdfPage({
                     id={inputId}
                     {...inputProps}
                     value={entryValue || ''}
-                    disabled={medicalBlocked}
+                    disabled={locked}
                     onChange={(event) => onEntryValueChange?.(field, event.target.value)}
                     aria-label={field.label}
                     placeholder={field.label}
                   />
                 )}
-                {medicalBlocked && <span className="medical-blocked-mask">Medical section blocked</span>}
               </div>
             );
           }
@@ -622,6 +648,7 @@ function PdfPage({
 }
 
 export default function PdfWorkspace({
+  className = '',
   pdfPath,
   fields,
   onFieldsChange,
@@ -634,7 +661,9 @@ export default function PdfWorkspace({
   entryMode = false,
   onEntryValueChange,
   readOnly = false,
-  values = {}
+  values = {},
+  minScale = 0.65,
+  fitPadding = 36
 }) {
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -673,7 +702,7 @@ export default function PdfWorkspace({
   if (error) return <div className="pdf-loading error">{error}</div>;
 
   return (
-    <div className="pdf-workspace" ref={wrapRef}>
+    <div className={`pdf-workspace ${className}`.trim()} ref={wrapRef}>
       {pages.map((page) => (
         <PdfPage
           key={page.pageNumber}
@@ -691,6 +720,8 @@ export default function PdfWorkspace({
           onEntryValueChange={onEntryValueChange}
           readOnly={readOnly}
           values={values}
+          minScale={minScale}
+          fitPadding={fitPadding}
         />
       ))}
     </div>

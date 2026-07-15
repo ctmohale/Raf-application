@@ -23,7 +23,7 @@ const emptyEmail = {
 
 export default function FirmClientsPage() {
   const { id } = useParams();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [workspace, setWorkspace] = useState(null);
   const [clientForm, setClientForm] = useState(emptyClient);
   const [clientModalOpen, setClientModalOpen] = useState(false);
@@ -47,15 +47,29 @@ export default function FirmClientsPage() {
 
   useEffect(() => {
     setSearchTerm(searchParams.get('q') || '');
+
+    if (searchParams.get('action') === 'onboard-client') {
+      setClientModalOpen(true);
+    }
   }, [searchParams]);
 
   function updateClientField(field, value) {
     setClientForm((current) => ({ ...current, [field]: value }));
   }
 
+  function openClientModal() {
+    setClientModalOpen(true);
+  }
+
   function closeClientModal() {
     setClientModalOpen(false);
     setClientForm(emptyClient);
+
+    if (searchParams.get('action') === 'onboard-client') {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('action');
+      setSearchParams(nextParams, { replace: true });
+    }
   }
 
   async function onboardClient(event) {
@@ -150,10 +164,6 @@ export default function FirmClientsPage() {
           <h2>Clients</h2>
           <p>Client records and upload links for {workspace.firm.name}.</p>
         </div>
-        <button className="primary-button" type="button" onClick={() => setClientModalOpen(true)}>
-          <Plus size={17} />
-          Onboard client
-        </button>
       </div>
 
       <StatusMessage type="error">{error}</StatusMessage>
@@ -209,6 +219,10 @@ export default function FirmClientsPage() {
             <p>Onboarded clients and upload links for RAF applications.</p>
           </div>
           <div className="firm-table-tools">
+            <button className="primary-button" type="button" onClick={openClientModal}>
+              <Plus size={17} />
+              Onboard client
+            </button>
             <label className="table-search" aria-label="Search clients">
               <Search size={16} />
               <input
@@ -241,7 +255,17 @@ export default function FirmClientsPage() {
           {clients.length === 0 && <p className="muted">No clients onboarded yet.</p>}
           {clients.length > 0 && filteredClients.length === 0 && <p className="muted">No clients match the selected filters.</p>}
           {filteredClients.length > 0 && (
-            <table className="firm-table">
+            <table className="firm-table clients-table">
+              <colgroup>
+                <col className="client-name-col" />
+                <col className="client-id-col" />
+                <col className="client-cell-col" />
+                <col className="client-email-col" />
+                <col className="client-cases-col" />
+                <col className="client-documents-col" />
+                <col className="client-reminders-col" />
+                <col className="client-actions-col" />
+              </colgroup>
               <thead>
                 <tr>
                   <th>Client</th>
@@ -251,44 +275,57 @@ export default function FirmClientsPage() {
                   <th>Cases</th>
                   <th>Documents</th>
                   <th>Reminders</th>
-	                  <th>Actions</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredClients.map((client) => (
-                  <tr key={client.id}>
-                    <td data-label="Client">
-                      <strong>{client.first_name} {client.surname}</strong>
-                      <span>Added {new Date(client.created_at).toLocaleDateString()}</span>
-                    </td>
-                    <td data-label="ID number">{client.id_number}</td>
-                    <td data-label="Cell">{client.cell}</td>
-                    <td data-label="Email">{client.email}</td>
-                    <td data-label="Cases">{client.case_count}</td>
-                    <td data-label="Documents">{client.uploaded_documents}/{client.requested_documents}</td>
-                    <td data-label="Reminders">
-                      <span className={`status-pill ${client.auto_reminders_enabled ? client.reminder_due ? 'warning' : 'active' : 'neutral'}`}>
-                        {client.auto_reminders_enabled ? client.reminder_due ? 'Due' : 'On' : 'Off'}
-                      </span>
-                      {client.auto_reminders_enabled && <span>{client.reminder_time}</span>}
-                    </td>
-	                    <td data-label="Actions">
-	                      <button type="button" onClick={() => openEmailModal(client)} title="Email client" aria-label={`Email ${client.first_name}`}>
-	                        <Mail size={15} />
-	                      </button>
-	                      <button type="button" onClick={() => copyInvite(client)} title="Copy client upload link" aria-label={`Copy upload link for ${client.first_name}`}>
-	                        <Copy size={15} />
-	                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {filteredClients.map((client) => {
+                  const requestedDocuments = Number(client.requested_documents || 0);
+                  const uploadedDocuments = Number(client.uploaded_documents || 0);
+                  const pendingDocuments = Number(client.pending_documents || Math.max(requestedDocuments - uploadedDocuments, 0));
+                  const documentTone = requestedDocuments > 0 && pendingDocuments === 0 ? 'active' : pendingDocuments > 0 ? 'warning' : 'neutral';
+
+                  return (
+                    <tr key={client.id}>
+                      <td className="client-name-cell" data-label="Client">
+                        <strong>{client.first_name} {client.surname}</strong>
+                        <span>Added {new Date(client.created_at).toLocaleDateString()}</span>
+                      </td>
+                      <td data-label="ID number">{client.id_number}</td>
+                      <td data-label="Cell">{client.cell}</td>
+                      <td data-label="Email">{client.email}</td>
+                      <td data-label="Cases">
+                        <span className="status-pill neutral">{client.case_count}</span>
+                      </td>
+                      <td data-label="Documents">
+                        <span className={`status-pill ${documentTone}`}>{uploadedDocuments}/{requestedDocuments}</span>
+                      </td>
+                      <td data-label="Reminders">
+                        <span className={`status-pill ${client.auto_reminders_enabled ? client.reminder_due ? 'warning' : 'active' : 'neutral'}`}>
+                          {client.auto_reminders_enabled ? client.reminder_due ? 'Due' : 'On' : 'Off'}
+                        </span>
+                        {client.auto_reminders_enabled && <span>{client.reminder_time}</span>}
+                      </td>
+                      <td data-label="Actions">
+                        <div className="table-actions">
+                          <button type="button" onClick={() => openEmailModal(client)} title="Email client" aria-label={`Email ${client.first_name}`}>
+                            <Mail size={15} />
+                          </button>
+                          <button type="button" onClick={() => copyInvite(client)} title="Copy client upload link" aria-label={`Copy upload link for ${client.first_name}`}>
+                            <Copy size={15} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
         </div>
       </section>
 
-	      {clientModalOpen && (
+      {clientModalOpen && (
         <div className="modal-backdrop" role="presentation">
           <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="client-modal-title">
             <div className="modal-header">
@@ -348,54 +385,55 @@ export default function FirmClientsPage() {
                       required
                     />
                   </label>
-	      )}
-	      {emailClient && (
-	        <div className="modal-backdrop" role="presentation">
-	          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="email-client-title">
-	            <div className="modal-header">
-	              <div>
-	                <h3 id="email-client-title">Email client</h3>
-	                <p>{emailClient.first_name} {emailClient.surname} · {emailClient.email}</p>
-	              </div>
-	              <button className="icon-button ghost" type="button" onClick={closeEmailModal} aria-label="Close email modal">
-	                <X size={18} />
-	              </button>
-	            </div>
-	            <form className="form-stack firm-form" onSubmit={sendClientEmail}>
-	              <label>
-	                Subject
-	                <input
-	                  value={emailForm.subject}
-	                  onChange={(event) => setEmailForm((current) => ({ ...current, subject: event.target.value }))}
-	                  required
-	                />
-	              </label>
-	              <label>
-	                Message
-	                <textarea
-	                  value={emailForm.body}
-	                  onChange={(event) => setEmailForm((current) => ({ ...current, body: event.target.value }))}
-	                  rows={8}
-	                  required
-	                />
-	              </label>
-	              <div className="modal-actions">
-	                <button className="secondary-button" type="button" onClick={closeEmailModal}>Cancel</button>
-	                <button className="primary-button" disabled={sendingEmail}>
-	                  {sendingEmail ? <ButtonSpinner label="Sending..." /> : <Send size={17} />}
-	                  {!sendingEmail && 'Send email'}
-	                </button>
-	              </div>
-	            </form>
-	          </section>
-	        </div>
-	      )}
-	    </section>
+                )}
+              </section>
               <div className="modal-actions">
                 <button className="secondary-button" type="button" onClick={closeClientModal}>Cancel</button>
                 <button className="primary-button" disabled={loading}>
                   {loading ? <ButtonSpinner label="Creating..." /> : clientForm.auto_reminders_enabled ? <BellRing size={17} /> : <UploadCloud size={17} />}
                   {!loading && 'Create client intake'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {emailClient && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="email-client-title">
+            <div className="modal-header">
+              <div>
+                <h3 id="email-client-title">Email client</h3>
+                <p>{emailClient.first_name} {emailClient.surname} - {emailClient.email}</p>
+              </div>
+              <button className="icon-button ghost" type="button" onClick={closeEmailModal} aria-label="Close email modal">
+                <X size={18} />
+              </button>
+            </div>
+            <form className="form-stack firm-form" onSubmit={sendClientEmail}>
+              <label>
+                Subject
+                <input
+                  value={emailForm.subject}
+                  onChange={(event) => setEmailForm((current) => ({ ...current, subject: event.target.value }))}
+                  required
+                />
+              </label>
+              <label>
+                Message
+                <textarea
+                  value={emailForm.body}
+                  onChange={(event) => setEmailForm((current) => ({ ...current, body: event.target.value }))}
+                  rows={8}
+                  required
+                />
+              </label>
+              <div className="modal-actions">
+                <button className="secondary-button" type="button" onClick={closeEmailModal}>Cancel</button>
+                <button className="primary-button" disabled={sendingEmail}>
+                  {sendingEmail ? <ButtonSpinner label="Sending..." /> : <Send size={17} />}
+                  {!sendingEmail && 'Send email'}
                 </button>
               </div>
             </form>

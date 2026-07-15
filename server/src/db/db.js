@@ -13,8 +13,13 @@ db.exec(`
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'client',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    role TEXT NOT NULL DEFAULT 'staff',
+    status TEXT NOT NULL DEFAULT 'active',
+    approved_by_user_id INTEGER,
+    approved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (approved_by_user_id) REFERENCES users(id) ON DELETE SET NULL
   );
 
   CREATE TABLE IF NOT EXISTS firms (
@@ -37,6 +42,18 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS user_firm_access (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    firm_id INTEGER NOT NULL,
+    access_level TEXT NOT NULL DEFAULT 'staff',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, firm_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (firm_id) REFERENCES firms(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS document_templates (
@@ -151,6 +168,8 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_templates_user ON document_templates(user_id);
   CREATE INDEX IF NOT EXISTS idx_firms_status ON firms(status);
+  CREATE INDEX IF NOT EXISTS idx_user_firm_access_user ON user_firm_access(user_id);
+  CREATE INDEX IF NOT EXISTS idx_user_firm_access_firm ON user_firm_access(firm_id);
   CREATE INDEX IF NOT EXISTS idx_fields_template ON template_fields(template_id);
   CREATE INDEX IF NOT EXISTS idx_docs_user ON generated_documents(user_id);
   CREATE INDEX IF NOT EXISTS idx_docs_template ON generated_documents(template_id);
@@ -165,6 +184,23 @@ const firmColumns = db.prepare('PRAGMA table_info(firms)').all().map((column) =>
 if (!firmColumns.includes('billing_rate_per_application')) {
   db.prepare('ALTER TABLE firms ADD COLUMN billing_rate_per_application REAL').run();
 }
+
+const userColumns = db.prepare('PRAGMA table_info(users)').all().map((column) => column.name);
+if (!userColumns.includes('status')) {
+  db.prepare("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'").run();
+}
+if (!userColumns.includes('approved_by_user_id')) {
+  db.prepare('ALTER TABLE users ADD COLUMN approved_by_user_id INTEGER').run();
+}
+if (!userColumns.includes('approved_at')) {
+  db.prepare('ALTER TABLE users ADD COLUMN approved_at TEXT').run();
+}
+if (!userColumns.includes('updated_at')) {
+  db.prepare('ALTER TABLE users ADD COLUMN updated_at TEXT').run();
+}
+db.prepare("UPDATE users SET role = 'staff' WHERE role = 'client'").run();
+db.prepare("UPDATE users SET status = 'active' WHERE status IS NULL OR status = ''").run();
+db.prepare("UPDATE users SET approved_at = COALESCE(approved_at, created_at), updated_at = COALESCE(updated_at, created_at)").run();
 
 export function serializeField(row) {
   if (!row) return null;

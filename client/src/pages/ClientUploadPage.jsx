@@ -1,43 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { Car, CheckCircle2, CircleDashed, FileUp, FolderOpen, Save, ShieldCheck, UploadCloud, UserRound } from 'lucide-react';
+import { CheckCircle2, ChevronDown, CircleDashed, FileText, FileUp, FolderOpen, Maximize2, Minimize2, Save, UploadCloud, X } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { ButtonSpinner } from '../components/LoadingSpinner.jsx';
+import PdfWorkspace from '../components/PdfWorkspace.jsx';
+import SignatureInput from '../components/SignatureInput.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
 
-const emptyIntakeForm = {
-  cell: '',
-  email: '',
-  passport_number: '',
-  date_of_birth: '',
-  residential_address: '',
-  occupation: '',
-  employer_details: '',
-  accident_time: '',
-  accident_location: '',
-  police_station: '',
-  police_case_number: '',
-  collision_description: '',
-  vehicle_description: '',
-  driver_name: '',
-  driver_contact: '',
-  witness_name: '',
-  witness_contact: '',
-  witness_statement: ''
-};
-
-function parseJson(value, fallback = {}) {
-  if (!value) return fallback;
-  if (typeof value === 'object') return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
-  }
-}
-
 function isVisibleDocumentRequest(request) {
   return String(request?.label || '').trim().toLowerCase() !== 'medical report';
+}
+
+function claimFormOptionLabel(form) {
+  return `${form.template?.name || form.document?.file_name || 'Attached template'} - ${form.case_reference}`;
 }
 
 function ClientPortalLoader() {
@@ -48,14 +23,14 @@ function ClientPortalLoader() {
           <div className="brand-mark large"><FileUp size={28} /></div>
           <div>
             <span className="eyebrow">Client document upload</span>
-            <h1>Preparing your intake workspace</h1>
+            <h1>Preparing your document workspace</h1>
           </div>
         </div>
         <div className="advanced-loader">
           <span className="advanced-loader-ring" aria-hidden="true" />
           <div>
             <strong>Loading claim data</strong>
-            <p>Checking requested documents, intake details, and upload status.</p>
+            <p>Checking attached templates, requested documents, and upload status.</p>
           </div>
         </div>
         <div className="client-loader-skeleton">
@@ -80,13 +55,16 @@ export default function ClientUploadPage() {
   const fileInputRefs = useRef({});
   const [portal, setPortal] = useState(null);
   const [files, setFiles] = useState({});
-  const [intakeForm, setIntakeForm] = useState(emptyIntakeForm);
-  const [lockedIntakeFields, setLockedIntakeFields] = useState({});
+  const [activeClaimFormId, setActiveClaimFormId] = useState('');
+  const [claimFormValues, setClaimFormValues] = useState({});
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [uploadingId, setUploadingId] = useState(null);
-  const [savingInfo, setSavingInfo] = useState(false);
+  const [savingClaimForm, setSavingClaimForm] = useState(false);
   const [loadingPortal, setLoadingPortal] = useState(true);
+  const [collapsedCards, setCollapsedCards] = useState({});
+  const [templateFullscreen, setTemplateFullscreen] = useState(false);
+  const [editingSignatureField, setEditingSignatureField] = useState(null);
 
   async function loadPortal() {
     setLoadingPortal(true);
@@ -100,60 +78,61 @@ export default function ClientUploadPage() {
   }
 
   function applyPortal(result) {
-    const latestCase = result.cases?.[0] || {};
-    const vehicle = parseJson(latestCase.vehicle_json);
-    const driver = parseJson(latestCase.driver_json);
-    const witnesses = parseJson(latestCase.witnesses_json, []);
-    const witness = Array.isArray(witnesses) ? witnesses[0] || {} : {};
-
-    const nextIntakeForm = {
-      cell: result.client?.cell || '',
-      email: result.client?.email || '',
-      passport_number: result.client?.passport_number || '',
-      date_of_birth: result.client?.date_of_birth || '',
-      residential_address: result.client?.residential_address || '',
-      occupation: result.client?.occupation || '',
-      employer_details: result.client?.employer_details || '',
-      accident_time: latestCase.accident_time || '',
-      accident_location: latestCase.accident_location || '',
-      police_station: latestCase.police_station || '',
-      police_case_number: latestCase.police_case_number || '',
-      collision_description: latestCase.collision_description || '',
-      vehicle_description: vehicle.description || '',
-      driver_name: driver.name || '',
-      driver_contact: driver.contact || '',
-      witness_name: witness.name || '',
-      witness_contact: witness.contact || '',
-      witness_statement: witness.statement || ''
-    };
-
     setPortal(result);
-    setIntakeForm(nextIntakeForm);
-    setLockedIntakeFields(Object.fromEntries(
-      Object.entries(nextIntakeForm).map(([field, value]) => [field, String(value || '').trim() !== ''])
-    ));
+    setActiveClaimFormId((current) => {
+      const forms = result.claimForms || [];
+      return forms.some((form) => String(form.id) === String(current)) ? current : forms[0]?.id ? String(forms[0].id) : '';
+    });
   }
 
-  function updateIntakeField(field, value) {
-    if (lockedIntakeFields[field]) return;
-    setIntakeForm((current) => ({ ...current, [field]: value }));
+  function updateClaimFormField(field, value) {
+    if (value === '__open_signature_pad__') {
+      setEditingSignatureField(field);
+      return;
+    }
+    setClaimFormValues((current) => ({ ...current, [field.name]: value }));
   }
 
-  function lockedFieldProps(field) {
-    if (!lockedIntakeFields[field]) return {};
-    return {
-      disabled: true,
-      title: 'This information is already on file and cannot be changed here.'
-    };
+  function signatureValueKey(field) {
+    return `${field.name}__field_${field.id}`;
+  }
+
+  function updateSignatureValue(value) {
+    if (!editingSignatureField) return;
+    setClaimFormValues((current) => ({
+      ...current,
+      [signatureValueKey(editingSignatureField)]: value
+    }));
   }
 
   function chooseDocumentFile(requestId) {
     fileInputRefs.current[requestId]?.click();
   }
 
+  function toggleCard(card) {
+    setCollapsedCards((current) => {
+      const nextCollapsed = !current[card];
+      if (card === 'templates' && nextCollapsed) setTemplateFullscreen(false);
+      return { ...current, [card]: nextCollapsed };
+    });
+  }
+
+  function isCardCollapsed(card) {
+    return Boolean(collapsedCards[card]);
+  }
+
   useEffect(() => {
     loadPortal().catch((err) => setError(err.message));
   }, [token]);
+
+  const claimForms = portal?.claimForms || [];
+  const activeClaimForm = claimForms.find((form) => String(form.id) === String(activeClaimFormId)) || null;
+  const canViewTemplates = portal?.portal_permissions?.template_view_enabled !== false;
+  const canEditTemplates = canViewTemplates && portal?.portal_permissions?.template_inputs_enabled !== false;
+
+  useEffect(() => {
+    setClaimFormValues(activeClaimForm?.document?.input || {});
+  }, [activeClaimForm?.id, activeClaimForm?.document?.id]);
 
   async function uploadDocument(requestId) {
     const file = files[requestId];
@@ -180,23 +159,24 @@ export default function ClientUploadPage() {
     }
   }
 
-  async function saveIntakeInfo(event) {
+  async function saveClaimForm(event) {
     event.preventDefault();
-    setSavingInfo(true);
+    if (!activeClaimForm || !canEditTemplates) return;
+    setSavingClaimForm(true);
     setError('');
     setMessage('');
 
     try {
-      const result = await apiRequest(`/api/client-portal/${token}/intake`, {
+      const result = await apiRequest(`/api/client-portal/${token}/forms/${activeClaimForm.id}`, {
         method: 'PATCH',
-        body: intakeForm
+        body: { data: claimFormValues }
       });
       applyPortal(result);
-      setMessage('Claim information saved successfully.');
+      setMessage(`${activeClaimForm.template?.name || 'Template'} saved successfully.`);
     } catch (err) {
       setError(err.message);
     } finally {
-      setSavingInfo(false);
+      setSavingClaimForm(false);
     }
   }
 
@@ -209,12 +189,20 @@ export default function ClientUploadPage() {
   return (
     <main className="client-upload-page">
       <section className="client-upload-panel">
-        <div className="auth-brand">
-          <div className="brand-mark large"><FileUp size={28} /></div>
-          <div>
-            <span className="eyebrow">Client document upload</span>
-            <h1>{portal?.firm?.name || 'Upload portal'}</h1>
+        <div className="client-upload-header">
+          <div className="auth-brand">
+            <div className="brand-mark large"><FileUp size={28} /></div>
+            <div>
+              <span className="eyebrow">Client document upload</span>
+              <h1>{portal?.firm?.name || 'Upload portal'}</h1>
+            </div>
           </div>
+          {portal && (
+            <div className="client-upload-intro">
+              <h2>{portal.client.first_name} {portal.client.surname}</h2>
+              <p>Forms and uploads</p>
+            </div>
+          )}
         </div>
 
         <StatusMessage type="error">{error}</StatusMessage>
@@ -222,185 +210,181 @@ export default function ClientUploadPage() {
 
         {portal && (
           <>
-            <div className="client-upload-intro">
-              <h2>{portal.client.first_name} {portal.client.surname}</h2>
-              <p>Confirm details and upload requested documents.</p>
-            </div>
-
-            <form className="client-intake-form" onSubmit={saveIntakeInfo}>
-              <div className="client-intake-header">
+            {canViewTemplates && <form className={`client-documents-panel client-template-panel client-collapsible-card ${isCardCollapsed('templates') ? 'collapsed' : ''} ${templateFullscreen ? 'fullscreen' : ''}`} onSubmit={saveClaimForm}>
+              <div className="client-documents-header">
                 <div>
-                  <h3>Client intake information</h3>
-                  <p>Add missing claim details.</p>
+                  <span className="eyebrow">Attached templates</span>
+                  <h3>Claim forms</h3>
                 </div>
-                <button className="primary-button" type="submit" disabled={savingInfo}>
-                  <Save size={17} />
-                  {savingInfo ? <ButtonSpinner label="Saving..." /> : 'Save information'}
-                </button>
+                <div className="client-card-actions">
+                  {claimForms.length > 0 && (
+                    <label className="client-template-picker" title="Select template">
+                      <FileText size={16} />
+                      <select value={activeClaimFormId} onChange={(event) => setActiveClaimFormId(event.target.value)} aria-label="Select attached template">
+                        {claimForms.map((form) => (
+                          <option value={String(form.id)} key={form.id}>
+                            {claimFormOptionLabel(form)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {canEditTemplates && (
+                    <button className="primary-button" type="submit" disabled={savingClaimForm || !activeClaimForm}>
+                      <Save size={17} />
+                      {savingClaimForm ? <ButtonSpinner label="Saving..." /> : 'Save template'}
+                    </button>
+                  )}
+                  {activeClaimForm?.template && !isCardCollapsed('templates') && (
+                    <button
+                      className="icon-button ghost"
+                      type="button"
+                      onClick={() => setTemplateFullscreen((current) => !current)}
+                      aria-label={templateFullscreen ? 'Exit template full screen' : 'View template full screen'}
+                      title={templateFullscreen ? 'Exit full screen' : 'View full screen'}
+                    >
+                      {templateFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+                    </button>
+                  )}
+                  <button
+                    className="icon-button ghost client-collapse-button"
+                    type="button"
+                    onClick={() => toggleCard('templates')}
+                    aria-expanded={!isCardCollapsed('templates')}
+                    aria-label={isCardCollapsed('templates') ? 'Expand attached templates' : 'Collapse attached templates'}
+                    title={isCardCollapsed('templates') ? 'Expand' : 'Collapse'}
+                  >
+                    <ChevronDown size={17} />
+                  </button>
+                </div>
               </div>
-              <div className="client-intake-sections">
-                <section className="client-intake-section">
-                  <div className="client-intake-section-title">
-                    <UserRound size={17} />
-                    <h4>Your details</h4>
-                  </div>
-                  <div className="client-intake-grid">
-                    <label>
-                      Contact number
-                      <input value={intakeForm.cell} onChange={(event) => updateIntakeField('cell', event.target.value)} placeholder="Your phone number" {...lockedFieldProps('cell')} />
-                    </label>
-                    <label>
-                      Email
-                      <input type="email" value={intakeForm.email} onChange={(event) => updateIntakeField('email', event.target.value)} placeholder="Your email address" {...lockedFieldProps('email')} />
-                    </label>
-                    <label>
-                      Passport number
-                      <input value={intakeForm.passport_number} onChange={(event) => updateIntakeField('passport_number', event.target.value)} placeholder="If applicable" {...lockedFieldProps('passport_number')} />
-                    </label>
-                    <label>
-                      Date of birth
-                      <input type="date" value={intakeForm.date_of_birth || ''} onChange={(event) => updateIntakeField('date_of_birth', event.target.value)} {...lockedFieldProps('date_of_birth')} />
-                    </label>
-                    <label className="span-2">
-                      Residential address
-                      <textarea value={intakeForm.residential_address} onChange={(event) => updateIntakeField('residential_address', event.target.value)} placeholder="Street address, suburb, city" {...lockedFieldProps('residential_address')} />
-                    </label>
-                    <label>
-                      Occupation
-                      <input value={intakeForm.occupation} onChange={(event) => updateIntakeField('occupation', event.target.value)} placeholder="Current occupation" {...lockedFieldProps('occupation')} />
-                    </label>
-                    <label>
-                      Employer details
-                      <input value={intakeForm.employer_details} onChange={(event) => updateIntakeField('employer_details', event.target.value)} placeholder="Employer name or details" {...lockedFieldProps('employer_details')} />
-                    </label>
-                  </div>
-                </section>
 
-                <section className="client-intake-section">
-                  <div className="client-intake-section-title">
-                    <ShieldCheck size={17} />
-                    <h4>Accident and police details</h4>
+              <div className="client-card-body client-template-body" hidden={isCardCollapsed('templates')}>
+                {claimForms.length > 0 ? (
+                  <>
+                  {activeClaimForm?.template && (
+                    <div className="client-template-preview medical-template-preview">
+                      <PdfWorkspace
+                        className="client-fit-pdf-workspace"
+                        pdfPath={`/api/client-portal/${token}/forms/${activeClaimForm.id}/template/pdf`}
+                        fields={activeClaimForm.template.fields || []}
+                        onFieldsChange={() => {}}
+                        selectedFieldId={null}
+                        onSelectField={() => {}}
+                        entryMode={canEditTemplates}
+                        readOnly={!canEditTemplates}
+                        onEntryValueChange={updateClaimFormField}
+                        values={claimFormValues}
+                        minScale={0.25}
+                        fitPadding={28}
+                      />
+                    </div>
+                  )}
+                  </>
+                ) : (
+                  <p className="muted">No template forms are attached to your claim yet.</p>
+                )}
+                {editingSignatureField && (
+                  <div className="signature-draw-popover" role="dialog" aria-modal="true" aria-label={`Draw ${editingSignatureField.label}`}>
+                    <div className="signature-draw-panel">
+                      <div className="signature-draw-header">
+                        <div>
+                          <strong>{editingSignatureField.label}</strong>
+                          <span>Handwritten signature</span>
+                        </div>
+                        <button className="icon-button ghost" type="button" onClick={() => setEditingSignatureField(null)} aria-label="Close signature pad">
+                          <X size={18} />
+                        </button>
+                      </div>
+                      <SignatureInput
+                        id={`client-template-signature-${editingSignatureField.id}`}
+                        value={String(claimFormValues[signatureValueKey(editingSignatureField)] || claimFormValues[editingSignatureField.name] || '')}
+                        onChange={updateSignatureValue}
+                      />
+                      <div className="signature-draw-actions">
+                        <button className="primary-button" type="button" onClick={() => setEditingSignatureField(null)}>Done</button>
+                      </div>
+                    </div>
                   </div>
-                  <div className="client-intake-grid">
-                    <label>
-                      Accident time
-                      <input type="time" value={intakeForm.accident_time || ''} onChange={(event) => updateIntakeField('accident_time', event.target.value)} {...lockedFieldProps('accident_time')} />
-                    </label>
-                    <label>
-                      Police station
-                      <input value={intakeForm.police_station} onChange={(event) => updateIntakeField('police_station', event.target.value)} placeholder="Station name" {...lockedFieldProps('police_station')} />
-                    </label>
-                    <label>
-                      Police case number
-                      <input value={intakeForm.police_case_number} onChange={(event) => updateIntakeField('police_case_number', event.target.value)} placeholder="Case number" {...lockedFieldProps('police_case_number')} />
-                    </label>
-                    <label className="span-2">
-                      Accident location
-                      <input value={intakeForm.accident_location} onChange={(event) => updateIntakeField('accident_location', event.target.value)} placeholder="Where the accident happened" {...lockedFieldProps('accident_location')} />
-                    </label>
-                    <label className="span-2">
-                      Description of collision
-                      <textarea value={intakeForm.collision_description} onChange={(event) => updateIntakeField('collision_description', event.target.value)} placeholder="Briefly describe what happened" {...lockedFieldProps('collision_description')} />
-                    </label>
-                  </div>
-                </section>
-
-                <section className="client-intake-section">
-                  <div className="client-intake-section-title">
-                    <Car size={17} />
-                    <h4>Vehicle, driver, and witnesses</h4>
-                  </div>
-                  <div className="client-intake-grid">
-                    <label className="span-2">
-                      Vehicle details
-                      <textarea value={intakeForm.vehicle_description} onChange={(event) => updateIntakeField('vehicle_description', event.target.value)} placeholder="Vehicle registration, make, model, or other details" {...lockedFieldProps('vehicle_description')} />
-                    </label>
-                    <label>
-                      Driver name
-                      <input value={intakeForm.driver_name} onChange={(event) => updateIntakeField('driver_name', event.target.value)} placeholder="Driver full name" {...lockedFieldProps('driver_name')} />
-                    </label>
-                    <label>
-                      Driver contact
-                      <input value={intakeForm.driver_contact} onChange={(event) => updateIntakeField('driver_contact', event.target.value)} placeholder="Driver phone number" {...lockedFieldProps('driver_contact')} />
-                    </label>
-                    <label>
-                      Witness name
-                      <input value={intakeForm.witness_name} onChange={(event) => updateIntakeField('witness_name', event.target.value)} placeholder="Witness full name" {...lockedFieldProps('witness_name')} />
-                    </label>
-                    <label>
-                      Witness contact
-                      <input value={intakeForm.witness_contact} onChange={(event) => updateIntakeField('witness_contact', event.target.value)} placeholder="Witness phone number" {...lockedFieldProps('witness_contact')} />
-                    </label>
-                    <label className="span-2">
-                      Witness information
-                      <textarea value={intakeForm.witness_statement} onChange={(event) => updateIntakeField('witness_statement', event.target.value)} placeholder="Any witness notes or statement details" {...lockedFieldProps('witness_statement')} />
-                    </label>
-                  </div>
-                </section>
+                )}
               </div>
-            </form>
+            </form>}
 
-            <section className="client-documents-panel">
+            <section className={`client-documents-panel client-collapsible-card ${isCardCollapsed('documents') ? 'collapsed' : ''}`}>
               <div className="client-documents-header">
                 <div>
                   <span className="eyebrow">Supporting documents</span>
                   <h3>Upload checklist</h3>
                   <p>{uploadedCount} of {requestCount} document(s) received by the law firm.</p>
                 </div>
-                <div className="client-upload-progress" aria-label={`${uploadProgress}% complete`}>
-                  <strong>{uploadProgress}%</strong>
-                  <span>complete</span>
+                <div className="client-card-actions">
+                  <div className="client-upload-progress" aria-label={`${uploadProgress}% complete`}>
+                    <strong>{uploadProgress}%</strong>
+                    <span>complete</span>
+                  </div>
+                  <button
+                    className="icon-button ghost client-collapse-button"
+                    type="button"
+                    onClick={() => toggleCard('documents')}
+                    aria-expanded={!isCardCollapsed('documents')}
+                    aria-label={isCardCollapsed('documents') ? 'Expand supporting documents' : 'Collapse supporting documents'}
+                    title={isCardCollapsed('documents') ? 'Expand' : 'Collapse'}
+                  >
+                    <ChevronDown size={17} />
+                  </button>
                 </div>
               </div>
-              <div className="client-upload-progress-bar" aria-hidden="true">
-                <i style={{ width: `${uploadProgress}%` }} />
-              </div>
+              <div className="client-card-body" hidden={isCardCollapsed('documents')}>
+                <div className="client-upload-progress-bar" aria-hidden="true">
+                  <i style={{ width: `${uploadProgress}%` }} />
+                </div>
 
-              <div className="client-request-list">
-                {visibleRequests.map((request) => (
-                  <article className={`client-request-card ${request.status === 'uploaded' ? 'uploaded' : ''} ${files[request.id] ? 'ready' : ''}`} key={request.id}>
-                    <span className="client-request-icon" aria-hidden="true">
-                      {request.status === 'uploaded' ? <CheckCircle2 size={18} /> : <FolderOpen size={18} />}
-                    </span>
-                    <div className="client-request-copy">
-                      <div className="client-request-title-row">
-                        <h3>{request.label}</h3>
-                      </div>
-                      <p>{request.original_filename ? `Uploaded: ${request.original_filename}` : 'PDF, image, or Word file.'}</p>
-                      <div className="client-selected-file-row">
-                        <div className={`client-selected-file ${files[request.id] ? 'ready' : ''}`} title={files[request.id]?.name || 'No file selected yet'}>
-                          {files[request.id] ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />}
-                          <span>{files[request.id]?.name || 'No file selected yet'}</span>
+                <div className="client-request-list">
+                  {visibleRequests.map((request) => (
+                    <article className={`client-request-card ${request.status === 'uploaded' ? 'uploaded' : ''} ${files[request.id] ? 'ready' : ''}`} key={request.id}>
+                      <span className="client-request-icon" aria-hidden="true">
+                        {request.status === 'uploaded' ? <CheckCircle2 size={18} /> : <FolderOpen size={18} />}
+                      </span>
+                      <div className="client-request-copy">
+                        <div className="client-request-title-row">
+                          <h3>{request.label}</h3>
+                        </div>
+                        <p>{request.original_filename ? `Uploaded: ${request.original_filename}` : 'PDF, image, or Word file.'}</p>
+                        <div className="client-selected-file-row">
+                          <div className={`client-selected-file ${files[request.id] ? 'ready' : ''}`} title={files[request.id]?.name || 'No file selected yet'}>
+                            {files[request.id] ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />}
+                            <span>{files[request.id]?.name || 'No file selected yet'}</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <div className="client-request-actions">
-                      {!files[request.id] && (
-                        <span className={`client-request-status ${request.status === 'uploaded' ? 'active' : 'pending'}`}>
-                          {request.status === 'uploaded' ? 'Received' : 'Requested'}
-                        </span>
-                      )}
-                      <button className="secondary-button file-picker-button" type="button" onClick={() => chooseDocumentFile(request.id)}>
-                        {files[request.id] ? 'Change' : 'Choose file'}
-                      </button>
-                      <input
-                        className="file-picker-input"
-                        id={`client-document-input-${request.id}`}
-                        ref={(node) => {
-                          if (node) fileInputRefs.current[request.id] = node;
-                          else delete fileInputRefs.current[request.id];
-                        }}
-                        type="file"
-                        accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
-                        onChange={(event) => setFiles((current) => ({ ...current, [request.id]: event.target.files?.[0] || null }))}
-                      />
-                      <button className={`primary-button ${files[request.id] ? 'success-button' : ''}`} type="button" disabled={uploadingId === request.id || !files[request.id]} onClick={() => uploadDocument(request.id)}>
-                        <UploadCloud size={17} />
-                        {uploadingId === request.id ? <ButtonSpinner label="Uploading..." /> : request.status === 'uploaded' ? 'Replace' : 'Upload'}
-                      </button>
-                    </div>
-                  </article>
-                ))}
+                      <div className="client-request-actions">
+                        {!files[request.id] && (
+                          <span className={`client-request-status ${request.status === 'uploaded' ? 'active' : 'pending'}`}>
+                            {request.status === 'uploaded' ? 'Received' : 'Requested'}
+                          </span>
+                        )}
+                        <button className="secondary-button file-picker-button" type="button" onClick={() => chooseDocumentFile(request.id)}>
+                          {files[request.id] ? 'Change' : 'Choose file'}
+                        </button>
+                        <input
+                          className="file-picker-input"
+                          id={`client-document-input-${request.id}`}
+                          ref={(node) => {
+                            if (node) fileInputRefs.current[request.id] = node;
+                            else delete fileInputRefs.current[request.id];
+                          }}
+                          type="file"
+                          accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                          onChange={(event) => setFiles((current) => ({ ...current, [request.id]: event.target.files?.[0] || null }))}
+                        />
+                        <button className={`primary-button ${files[request.id] ? 'success-button' : ''}`} type="button" disabled={uploadingId === request.id || !files[request.id]} onClick={() => uploadDocument(request.id)}>
+                          <UploadCloud size={17} />
+                          {uploadingId === request.id ? <ButtonSpinner label="Uploading..." /> : request.status === 'uploaded' ? 'Replace' : 'Upload'}
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
               </div>
             </section>
           </>

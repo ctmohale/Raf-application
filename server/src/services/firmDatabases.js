@@ -219,6 +219,19 @@ export function initializeFirmDatabase(firm) {
         FOREIGN KEY (client_id) REFERENCES firm_clients(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS firm_doctors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        full_name TEXT NOT NULL,
+        practice_number TEXT,
+        email TEXT,
+        phone TEXT,
+        specialty TEXT,
+        relationship_notes TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE INDEX IF NOT EXISTS idx_templates_user ON document_templates(user_id);
       CREATE INDEX IF NOT EXISTS idx_fields_template ON template_fields(template_id);
       CREATE INDEX IF NOT EXISTS idx_docs_user ON generated_documents(user_id);
@@ -233,6 +246,7 @@ export function initializeFirmDatabase(firm) {
       CREATE INDEX IF NOT EXISTS idx_claim_forms_template ON claim_form_templates(template_id);
       CREATE INDEX IF NOT EXISTS idx_medical_assessments_case ON medical_assessment_requests(case_id);
       CREATE INDEX IF NOT EXISTS idx_medical_assessments_token ON medical_assessment_requests(secure_token);
+      CREATE INDEX IF NOT EXISTS idx_firm_doctors_status ON firm_doctors(status);
     `);
 
     const clientColumns = firmDb.prepare('PRAGMA table_info(firm_clients)').all().map((column) => column.name);
@@ -253,6 +267,17 @@ export function initializeFirmDatabase(firm) {
     addClientColumn('employer_details', 'TEXT');
     addClientColumn('banking_json', 'TEXT');
     addClientColumn('representative_json', 'TEXT');
+    addClientColumn('portal_templates_visible', 'INTEGER NOT NULL DEFAULT 1');
+    addClientColumn('portal_template_inputs_enabled', 'INTEGER NOT NULL DEFAULT 1');
+
+    const claimFormColumns = firmDb.prepare('PRAGMA table_info(claim_form_templates)').all().map((column) => column.name);
+    const addClaimFormColumn = (name, definition) => {
+      if (!claimFormColumns.includes(name)) {
+        firmDb.prepare(`ALTER TABLE claim_form_templates ADD COLUMN ${name} ${definition}`).run();
+      }
+    };
+
+    addClaimFormColumn('client_portal_visible', 'INTEGER NOT NULL DEFAULT 1');
 
     const caseColumns = firmDb.prepare('PRAGMA table_info(raf_cases)').all().map((column) => column.name);
     const addCaseColumn = (name, definition) => {
@@ -289,6 +314,9 @@ export function initializeFirmDatabase(firm) {
 
     addMedicalAssessmentColumn('assessment_json', 'TEXT');
     addMedicalAssessmentColumn('submitted_at', 'TEXT');
+    addMedicalAssessmentColumn('inherit_client_information', 'INTEGER NOT NULL DEFAULT 1');
+    addMedicalAssessmentColumn('lock_prefilled_fields', 'INTEGER NOT NULL DEFAULT 1');
+    addMedicalAssessmentColumn('hide_prefilled_fields', 'INTEGER NOT NULL DEFAULT 0');
 
     firmDb.exec(`
       CREATE INDEX IF NOT EXISTS idx_clients_next_reminder ON firm_clients(next_reminder_at);

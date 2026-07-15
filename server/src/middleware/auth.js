@@ -5,7 +5,7 @@ import { db } from '../db/db.js';
 
 export function signToken(user) {
   return jwt.sign(
-    { id: user.id, email: user.email, role: user.role },
+    { id: user.id, email: user.email, role: user.role, status: user.status },
     config.jwtSecret,
     { expiresIn: '7d' }
   );
@@ -22,8 +22,9 @@ export function authenticate(req, res, next) {
 
   try {
     const payload = jwt.verify(token, config.jwtSecret);
-    const user = db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(payload.id);
+    const user = db.prepare('SELECT id, name, email, role, status FROM users WHERE id = ?').get(payload.id);
     if (!user) return res.status(401).json({ error: 'Invalid session' });
+    if (user.status !== 'active' && user.role !== 'admin') return res.status(403).json({ error: 'Account access is not active' });
     req.user = user;
     return next();
   } catch {
@@ -52,19 +53,22 @@ export function authenticateJwtOrApiKey(req, res, next) {
   const keyHash = hashApiKey(apiKey);
   const record = db.prepare(`
     SELECT api_keys.*, users.email, users.name AS user_name, users.role
+      , users.status AS user_status
     FROM api_keys
     JOIN users ON users.id = api_keys.user_id
     WHERE api_keys.key_hash = ?
   `).get(keyHash);
 
   if (!record) return res.status(401).json({ error: 'Invalid API key' });
+  if (record.user_status !== 'active' && record.role !== 'admin') return res.status(403).json({ error: 'Account access is not active' });
 
   db.prepare('UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?').run(record.id);
   req.user = {
     id: record.user_id,
     email: record.email,
     name: record.user_name,
-    role: record.role
+    role: record.role,
+    status: record.user_status
   };
   req.apiKey = record;
   return next();

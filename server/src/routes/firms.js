@@ -180,14 +180,49 @@ function serializeFirmClient(row, baseUrl) {
   return {
     ...row,
     auto_reminders_enabled: Boolean(row.auto_reminders_enabled),
+    portal_templates_visible: row.portal_templates_visible !== 0,
+    portal_template_inputs_enabled: row.portal_template_inputs_enabled !== 0,
     pending_documents: Number(row.pending_documents || 0),
     reminder_due: Boolean(row.reminder_due),
     invite_url: `${baseUrl.replace(/\/$/, '')}/client-upload/${row.invite_token}`
   };
 }
 
+function serializeFirmDoctor(row) {
+  return {
+    ...row,
+    status: row.status || 'active'
+  };
+}
+
+function getRequestClientOrigin(req) {
+  const origin = req?.get?.('origin');
+  if (origin && /^https?:\/\//i.test(origin)) return origin;
+
+  const referer = req?.get?.('referer');
+  if (referer) {
+    try {
+      const url = new URL(referer);
+      return url.origin;
+    } catch {
+      // Fall through to host/env-based origin.
+    }
+  }
+
+  const forwardedHost = req?.get?.('x-forwarded-host');
+  const host = forwardedHost || req?.get?.('host');
+  if (host) {
+    const forwardedProto = req?.get?.('x-forwarded-proto')?.split(',')[0]?.trim();
+    const protocol = forwardedProto || req?.protocol || 'http';
+    return `${protocol}://${host}`;
+  }
+
+  return config.clientOrigin;
+}
+
 function getWorkspacePayload(firm, req) {
   const firmDb = openFirmDatabase(firm);
+  const clientOrigin = getRequestClientOrigin(req);
 
   try {
     const clients = firmDb.prepare(`
@@ -211,7 +246,7 @@ function getWorkspacePayload(firm, req) {
         new Date(client.next_reminder_at) <= new Date()
       );
 
-      return serializeFirmClient({ ...client, reminder_due: reminderDue }, config.clientOrigin);
+      return serializeFirmClient({ ...client, reminder_due: reminderDue }, clientOrigin);
     });
 
     const cases = firmDb.prepare(`
@@ -254,13 +289,23 @@ function getWorkspacePayload(firm, req) {
       JOIN firm_clients ON firm_clients.id = medical_assessment_requests.client_id
       ORDER BY medical_assessment_requests.created_at DESC
       LIMIT 50
-    `).all().map(serializeMedicalAssessmentRequest);
+    `).all().map((request) => serializeMedicalAssessmentRequest(request, clientOrigin));
+
+    const doctors = firmDb.prepare(`
+      SELECT *
+      FROM firm_doctors
+      ORDER BY
+        CASE status WHEN 'active' THEN 0 ELSE 1 END,
+        full_name COLLATE NOCASE
+    `).all().map(serializeFirmDoctor);
 
     const stats = {
       clients: firmDb.prepare('SELECT COUNT(*) AS count FROM firm_clients').get().count,
       openCases: firmDb.prepare("SELECT COUNT(*) AS count FROM raf_cases WHERE status != 'closed'").get().count,
       requestedDocuments: firmDb.prepare("SELECT COUNT(*) AS count FROM client_document_requests WHERE status = 'requested'").get().count,
       uploadedDocuments: firmDb.prepare('SELECT COUNT(*) AS count FROM client_uploads').get().count,
+      doctors: doctors.length,
+      activeDoctors: doctors.filter((doctor) => doctor.status === 'active').length,
       autoReminders: clients.filter((client) => client.auto_reminders_enabled && client.pending_documents > 0).length,
       remindersDue: clients.filter((client) => client.reminder_due).length
     };
@@ -272,6 +317,7 @@ function getWorkspacePayload(firm, req) {
       cases,
       documentRequests,
       medicalAssessmentRequests,
+      doctors,
       claimForms: getClaimFormAttachments(firmDb)
     };
   } finally {
@@ -442,6 +488,33 @@ function getAvailableClaimTemplates() {
   `).all().map(serializeTemplate);
 }
 
+function findMedicalTemplateForReport(reportType) {
+  const templates = db.prepare(`
+    SELECT document_templates.*, COUNT(template_fields.id) AS field_count
+    FROM document_templates
+    LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
+    WHERE document_templates.status = 'ready'
+    GROUP BY document_templates.id
+    ORDER BY document_templates.updated_at DESC, document_templates.id DESC
+  `).all();
+
+  if (reportType === 'raf_1_medical_section') {
+    return templates.find((template) => {
+      const name = normalizeDataKey(template.name);
+      return name.includes('raf1') || name.includes('rafclaimform1');
+    }) || null;
+  }
+
+  if (reportType === 'raf_4_serious_injury') {
+    return templates.find((template) => {
+      const name = normalizeDataKey(template.name);
+      return name.includes('raf4') || name.includes('rafclaimform4');
+    }) || null;
+  }
+
+  return null;
+}
+
 function serializeClaimFormAttachment(row) {
   const template = db.prepare(`
     SELECT document_templates.*, COUNT(template_fields.id) AS field_count
@@ -461,16 +534,20 @@ function serializeClaimFormAttachment(row) {
 
   return {
     ...row,
+    client_portal_visible: row.client_portal_visible !== 0,
     template: template ? serializeTemplate(template) : null,
     document: document ? serializeDocument(document) : null
   };
 }
 
-function serializeMedicalAssessmentRequest(row) {
+function serializeMedicalAssessmentRequest(row, clientOrigin = config.clientOrigin) {
   if (!row) return null;
   return {
     ...row,
-    secure_url: `${config.clientOrigin.replace(/\/$/, '')}/medical-assessment/${row.secure_token}`
+    inherit_client_information: row.inherit_client_information !== 0,
+    lock_prefilled_fields: row.lock_prefilled_fields !== 0,
+    hide_prefilled_fields: Boolean(row.hide_prefilled_fields),
+    secure_url: `${clientOrigin.replace(/\/$/, '')}/medical-assessment/${row.secure_token}`
   };
 }
 
@@ -667,9 +744,40 @@ async function generateClaimFormDocument({ firm, claim, template, userId, source
   });
 }
 
-firmsRouter.use(authenticate, requireAdmin);
+firmsRouter.use(authenticate);
 
-firmsRouter.get('/', (_req, res) => {
+function requireAdminOnly(req, res, next) {
+  return requireAdmin(req, res, next);
+}
+
+function getUserFirmAccess(userId, firmId) {
+  return db.prepare(`
+    SELECT *
+    FROM user_firm_access
+    WHERE user_id = ? AND firm_id = ?
+  `).get(userId, firmId);
+}
+
+function requireFirmAccess(options = {}) {
+  return (req, res, next) => {
+    const firm = getFirmOr404(req.params.id, res);
+    if (!firm) return;
+    req.firm = firm;
+
+    if (req.user?.role === 'admin') return next();
+
+    const access = getUserFirmAccess(req.user.id, firm.id);
+    if (!access) return res.status(403).json({ error: 'Access to this firm workspace is required' });
+    if (options.write && access.access_level === 'viewer') {
+      return res.status(403).json({ error: 'Viewer access cannot change firm records' });
+    }
+
+    req.firmAccess = access;
+    return next();
+  };
+}
+
+firmsRouter.get('/', requireAdminOnly, (_req, res) => {
   const firms = db.prepare(`
     SELECT *
     FROM firms
@@ -685,7 +793,7 @@ firmsRouter.get('/', (_req, res) => {
   res.json({ firms, summary });
 });
 
-firmsRouter.get('/messages/overview', (_req, res) => {
+firmsRouter.get('/messages/overview', requireAdminOnly, (_req, res) => {
   const firms = db.prepare('SELECT * FROM firms ORDER BY name COLLATE NOCASE').all();
 
   const rows = firms.map((firm) => {
@@ -726,20 +834,22 @@ firmsRouter.get('/messages/overview', (_req, res) => {
   });
 });
 
-firmsRouter.get('/:id/messages', (req, res) => {
+firmsRouter.get('/:id/messages', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
   res.json({ firm: serializeFirm(firm), messages: getFirmMessageThread(firm.id) });
 });
 
-firmsRouter.post('/:id/messages', (req, res) => {
+firmsRouter.post('/:id/messages', requireFirmAccess({ write: true }), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
   const body = String(req.body?.body || '').trim();
   if (!body) return res.status(400).json({ error: 'Message is required' });
 
-  const senderType = req.body?.sender_type === 'firm' ? 'firm' : 'admin';
+  const senderType = req.user?.role === 'admin'
+    ? req.body?.sender_type === 'firm' ? 'firm' : 'admin'
+    : 'firm';
   const senderName = senderType === 'firm' ? firm.name : req.user.name || 'Admin';
 
   db.prepare(`
@@ -757,11 +867,13 @@ firmsRouter.post('/:id/messages', (req, res) => {
   res.status(201).json({ firm: serializeFirm(firm), messages: getFirmMessageThread(firm.id) });
 });
 
-firmsRouter.patch('/:id/messages/read', (req, res) => {
+firmsRouter.patch('/:id/messages/read', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
-  const readerType = req.body?.reader_type === 'firm' ? 'firm' : 'admin';
+  const readerType = req.user?.role === 'admin'
+    ? req.body?.reader_type === 'firm' ? 'firm' : 'admin'
+    : 'firm';
   if (readerType === 'firm') {
     db.prepare(`
       UPDATE firm_messages
@@ -779,7 +891,7 @@ firmsRouter.patch('/:id/messages/read', (req, res) => {
   res.json({ firm: serializeFirm(firm), messages: getFirmMessageThread(firm.id) });
 });
 
-firmsRouter.post('/', (req, res) => {
+firmsRouter.post('/', requireAdminOnly, (req, res) => {
   const { name, contact_name: contactName, contact_email: contactEmail, contact_phone: contactPhone, address } = req.body || {};
 
   if (!name || String(name).trim().length < 2) {
@@ -818,13 +930,124 @@ firmsRouter.post('/', (req, res) => {
   res.status(201).json({ firm: serializeFirm(firm) });
 });
 
-firmsRouter.get('/:id/workspace', (req, res) => {
+firmsRouter.get('/:id/workspace', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
   res.json(getWorkspacePayload(firm, req));
 });
 
-firmsRouter.get('/:id/templates', (req, res) => {
+firmsRouter.post('/:id/doctors', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const fullName = cleanString(req.body?.full_name);
+  const practiceNumber = cleanString(req.body?.practice_number);
+  const email = cleanString(req.body?.email);
+  const phone = cleanString(req.body?.phone);
+  const specialty = cleanString(req.body?.specialty);
+  const relationshipNotes = cleanString(req.body?.relationship_notes);
+
+  if (!fullName) return res.status(400).json({ error: 'Doctor name is required' });
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const result = firmDb.prepare(`
+      INSERT INTO firm_doctors
+        (full_name, practice_number, email, phone, specialty, relationship_notes, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'active')
+    `).run(
+      fullName,
+      practiceNumber || null,
+      email || null,
+      phone || null,
+      specialty || null,
+      relationshipNotes || null
+    );
+
+    const doctor = serializeFirmDoctor(firmDb.prepare('SELECT * FROM firm_doctors WHERE id = ?').get(result.lastInsertRowid));
+    return res.status(201).json({
+      doctor,
+      workspace: getWorkspacePayload(firm, req)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.patch('/:id/doctors/:doctorId', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const fullName = cleanString(req.body?.full_name);
+  const practiceNumber = cleanString(req.body?.practice_number);
+  const email = cleanString(req.body?.email);
+  const phone = cleanString(req.body?.phone);
+  const specialty = cleanString(req.body?.specialty);
+  const relationshipNotes = cleanString(req.body?.relationship_notes);
+  const status = cleanString(req.body?.status) || 'active';
+
+  if (!fullName) return res.status(400).json({ error: 'Doctor name is required' });
+  if (!['active', 'inactive'].includes(status)) return res.status(400).json({ error: 'Choose active or inactive status' });
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const existing = firmDb.prepare('SELECT * FROM firm_doctors WHERE id = ?').get(req.params.doctorId);
+    if (!existing) return res.status(404).json({ error: 'Doctor not found' });
+
+    firmDb.prepare(`
+      UPDATE firm_doctors
+      SET
+        full_name = ?,
+        practice_number = ?,
+        email = ?,
+        phone = ?,
+        specialty = ?,
+        relationship_notes = ?,
+        status = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      fullName,
+      practiceNumber || null,
+      email || null,
+      phone || null,
+      specialty || null,
+      relationshipNotes || null,
+      status,
+      existing.id
+    );
+
+    const doctor = serializeFirmDoctor(firmDb.prepare('SELECT * FROM firm_doctors WHERE id = ?').get(existing.id));
+    return res.json({
+      doctor,
+      workspace: getWorkspacePayload(firm, req)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.delete('/:id/doctors/:doctorId', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const existing = firmDb.prepare('SELECT * FROM firm_doctors WHERE id = ?').get(req.params.doctorId);
+    if (!existing) return res.status(404).json({ error: 'Doctor not found' });
+
+    firmDb.prepare('DELETE FROM firm_doctors WHERE id = ?').run(existing.id);
+    return res.json({
+      deleted: true,
+      doctor: serializeFirmDoctor(existing),
+      workspace: getWorkspacePayload(firm, req)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.get('/:id/templates', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -844,7 +1067,7 @@ firmsRouter.get('/:id/templates', (req, res) => {
   }
 });
 
-firmsRouter.get('/:id/documents', (req, res) => {
+firmsRouter.get('/:id/documents', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -863,7 +1086,7 @@ firmsRouter.get('/:id/documents', (req, res) => {
   }
 });
 
-firmsRouter.get('/:id/claims/:caseId/forms', (req, res) => {
+firmsRouter.get('/:id/claims/:caseId/forms', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -883,7 +1106,7 @@ firmsRouter.get('/:id/claims/:caseId/forms', (req, res) => {
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/medical-assessments', async (req, res) => {
+firmsRouter.post('/:id/claims/:caseId/medical-assessments', requireFirmAccess({ write: true }), async (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -894,6 +1117,11 @@ firmsRouter.post('/:id/claims/:caseId/medical-assessments', async (req, res) => 
   const doctorPhone = cleanString(req.body?.doctor_phone);
   const deadline = cleanString(req.body?.deadline);
   const deliveryMethod = cleanString(req.body?.delivery_method) || 'link';
+  const inheritClientInformation = req.body?.inherit_client_information !== false;
+  const lockPrefilledFields = req.body?.lock_prefilled_fields !== false;
+  const hidePrefilledFields = Boolean(req.body?.hide_prefilled_fields);
+  const refreshInheritedInformation = Boolean(req.body?.refresh_inherited_information);
+  const clientOrigin = getRequestClientOrigin(req);
 
   if (!medicalReportTypes.has(reportType)) return res.status(400).json({ error: 'Choose a valid medical report type' });
   if (!doctorName) return res.status(400).json({ error: 'Doctor name is required' });
@@ -908,8 +1136,12 @@ firmsRouter.post('/:id/claims/:caseId/medical-assessments', async (req, res) => 
     const token = randomUUID();
     const result = firmDb.prepare(`
       INSERT INTO medical_assessment_requests
-        (case_id, client_id, report_type, doctor_name, practice_number, doctor_email, doctor_phone, deadline, delivery_method, secure_token, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested')
+        (
+          case_id, client_id, report_type, doctor_name, practice_number, doctor_email, doctor_phone,
+          deadline, delivery_method, secure_token, status,
+          inherit_client_information, lock_prefilled_fields, hide_prefilled_fields
+        )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?)
     `).run(
       claim.id,
       claim.client_id,
@@ -920,10 +1152,13 @@ firmsRouter.post('/:id/claims/:caseId/medical-assessments', async (req, res) => 
       doctorPhone || null,
       deadline || null,
       deliveryMethod,
-      token
+      token,
+      inheritClientInformation ? 1 : 0,
+      lockPrefilledFields ? 1 : 0,
+      hidePrefilledFields ? 1 : 0
     );
 
-    let request = serializeMedicalAssessmentRequest(firmDb.prepare('SELECT * FROM medical_assessment_requests WHERE id = ?').get(result.lastInsertRowid));
+    let request = serializeMedicalAssessmentRequest(firmDb.prepare('SELECT * FROM medical_assessment_requests WHERE id = ?').get(result.lastInsertRowid), clientOrigin);
     let delivery = { sent: false, method: deliveryMethod };
 
     if (deliveryMethod === 'email' && doctorEmail) {
@@ -946,7 +1181,7 @@ firmsRouter.post('/:id/claims/:caseId/medical-assessments', async (req, res) => 
           SET status = 'sent', sent_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(request.id);
-        request = serializeMedicalAssessmentRequest(firmDb.prepare('SELECT * FROM medical_assessment_requests WHERE id = ?').get(request.id));
+        request = serializeMedicalAssessmentRequest(firmDb.prepare('SELECT * FROM medical_assessment_requests WHERE id = ?').get(request.id), clientOrigin);
         delivery = { sent: true, method: deliveryMethod };
       } catch (error) {
         delivery = { sent: false, method: deliveryMethod, error: error.message };
@@ -963,7 +1198,106 @@ firmsRouter.post('/:id/claims/:caseId/medical-assessments', async (req, res) => 
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/forms', async (req, res, next) => {
+firmsRouter.patch('/:id/claims/:caseId/medical-assessments/:requestId', requireFirmAccess({ write: true }), async (req, res) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const reportType = cleanString(req.body?.report_type) || 'supporting_medical_report';
+  const doctorName = cleanString(req.body?.doctor_name);
+  const practiceNumber = cleanString(req.body?.practice_number);
+  const doctorEmail = cleanString(req.body?.doctor_email);
+  const doctorPhone = cleanString(req.body?.doctor_phone);
+  const deadline = cleanString(req.body?.deadline);
+  const deliveryMethod = cleanString(req.body?.delivery_method) || 'link';
+  const inheritClientInformation = req.body?.inherit_client_information !== false;
+  const lockPrefilledFields = req.body?.lock_prefilled_fields !== false;
+  const hidePrefilledFields = Boolean(req.body?.hide_prefilled_fields);
+  const refreshInheritedInformation = Boolean(req.body?.refresh_inherited_information);
+  const clientOrigin = getRequestClientOrigin(req);
+
+  if (!medicalReportTypes.has(reportType)) return res.status(400).json({ error: 'Choose a valid medical report type' });
+  if (!doctorName) return res.status(400).json({ error: 'Doctor name is required' });
+  if (deliveryMethod !== 'link' && !doctorEmail && !doctorPhone) return res.status(400).json({ error: 'Doctor email or phone is required' });
+  if (!['link', 'email', 'sms'].includes(deliveryMethod)) return res.status(400).json({ error: 'Choose link, email, or SMS delivery' });
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const claim = getClaimWithClient(firmDb, req.params.caseId);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+
+    const existing = firmDb.prepare(`
+      SELECT * FROM medical_assessment_requests
+      WHERE id = ? AND case_id = ? AND client_id = ?
+    `).get(req.params.requestId, claim.id, claim.client_id);
+    if (!existing) return res.status(404).json({ error: 'Medical assessment request not found' });
+
+    firmDb.prepare(`
+      UPDATE medical_assessment_requests
+      SET
+        report_type = ?,
+        doctor_name = ?,
+        practice_number = ?,
+        doctor_email = ?,
+        doctor_phone = ?,
+        deadline = ?,
+        delivery_method = ?,
+        inherit_client_information = ?,
+        lock_prefilled_fields = ?,
+        hide_prefilled_fields = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      reportType,
+      doctorName,
+      practiceNumber || null,
+      doctorEmail || null,
+      doctorPhone || null,
+      deadline || null,
+      deliveryMethod,
+      inheritClientInformation ? 1 : 0,
+      lockPrefilledFields ? 1 : 0,
+      hidePrefilledFields ? 1 : 0,
+      existing.id
+    );
+
+    if (refreshInheritedInformation && inheritClientInformation) {
+      const template = findMedicalTemplateForReport(reportType);
+      if (template) {
+        const fields = getTemplateFields(template.id).map(serializeField);
+        const latestInheritedValues = buildClaimTemplateData({ firm, claim, fields });
+        const existingValues = parseJson(existing.assessment_json, {});
+        const refreshedValues = { ...existingValues };
+
+        fields.forEach((field) => {
+          const nextValue = latestInheritedValues[field.name];
+          if (nextValue !== undefined && nextValue !== null && String(nextValue).trim() !== '') {
+            refreshedValues[field.name] = nextValue;
+          }
+        });
+
+        firmDb.prepare(`
+          UPDATE medical_assessment_requests
+          SET assessment_json = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(JSON.stringify(refreshedValues), existing.id);
+      }
+    }
+
+    const request = serializeMedicalAssessmentRequest(
+      firmDb.prepare('SELECT * FROM medical_assessment_requests WHERE id = ?').get(existing.id),
+      clientOrigin
+    );
+
+    return res.json({
+      request,
+      workspace: getWorkspacePayload(firm, req)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.post('/:id/claims/:caseId/forms', requireFirmAccess({ write: true }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1020,7 +1354,7 @@ firmsRouter.post('/:id/claims/:caseId/forms', async (req, res, next) => {
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', async (req, res, next) => {
+firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', requireFirmAccess({ write: true }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1068,7 +1402,7 @@ firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', async (req, 
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-manual', async (req, res, next) => {
+firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-manual', requireFirmAccess({ write: true }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1113,7 +1447,34 @@ firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-manual', async (r
   }
 });
 
-firmsRouter.delete('/:id/claims/:caseId/forms/:attachmentId', (req, res) => {
+firmsRouter.patch('/:id/claims/:caseId/forms/:attachmentId/share', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const claim = getClaimWithClient(firmDb, req.params.caseId);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+
+    const visible = Boolean(req.body?.client_portal_visible);
+    const result = firmDb.prepare(`
+      UPDATE claim_form_templates
+      SET client_portal_visible = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND case_id = ?
+    `).run(visible ? 1 : 0, req.params.attachmentId, claim.id);
+
+    if (result.changes === 0) return res.status(404).json({ error: 'Attached claim form not found' });
+
+    return res.json({
+      attached_forms: getClaimFormAttachments(firmDb, claim.id),
+      workspace: getWorkspacePayload(firm, req)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.delete('/:id/claims/:caseId/forms/:attachmentId', requireFirmAccess({ write: true }), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1135,7 +1496,7 @@ firmsRouter.delete('/:id/claims/:caseId/forms/:attachmentId', (req, res) => {
   }
 });
 
-firmsRouter.post('/:id/clients', (req, res) => {
+firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1280,7 +1641,7 @@ firmsRouter.post('/:id/clients', (req, res) => {
   }
 });
 
-firmsRouter.post('/:id/clients/:clientId/invite', async (req, res, next) => {
+firmsRouter.post('/:id/clients/:clientId/invite', requireFirmAccess({ write: true }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1328,7 +1689,48 @@ firmsRouter.post('/:id/clients/:clientId/invite', async (req, res, next) => {
   }
 });
 
-firmsRouter.post('/:id/clients/:clientId/email', async (req, res, next) => {
+firmsRouter.patch('/:id/clients/:clientId/portal-settings', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const client = firmDb.prepare('SELECT * FROM firm_clients WHERE id = ?').get(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const templatesVisible = req.body?.portal_templates_visible === undefined
+      ? client.portal_templates_visible !== 0
+      : Boolean(req.body.portal_templates_visible);
+    const templateInputsEnabled = templatesVisible && (
+      req.body?.portal_template_inputs_enabled === undefined
+        ? client.portal_template_inputs_enabled !== 0
+        : Boolean(req.body.portal_template_inputs_enabled)
+    );
+
+    firmDb.prepare(`
+      UPDATE firm_clients
+      SET
+        portal_templates_visible = ?,
+        portal_template_inputs_enabled = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      templatesVisible ? 1 : 0,
+      templateInputsEnabled ? 1 : 0,
+      client.id
+    );
+
+    const updatedClient = firmDb.prepare('SELECT * FROM firm_clients WHERE id = ?').get(client.id);
+    return res.json({
+      client: serializeFirmClient(updatedClient, getRequestClientOrigin(req)),
+      workspace: getWorkspacePayload(firm, req)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.post('/:id/clients/:clientId/email', requireFirmAccess({ write: true }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1372,7 +1774,7 @@ firmsRouter.post('/:id/clients/:clientId/email', async (req, res, next) => {
   }
 });
 
-firmsRouter.post('/:id/document-requests/:requestId/upload', clientDocumentUpload.single('document'), (req, res) => {
+firmsRouter.post('/:id/document-requests/:requestId/upload', requireFirmAccess({ write: true }), clientDocumentUpload.single('document'), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
   if (!req.file) return res.status(400).json({ error: 'Document file is required' });
@@ -1415,7 +1817,7 @@ firmsRouter.post('/:id/document-requests/:requestId/upload', clientDocumentUploa
   }
 });
 
-firmsRouter.get('/:id/uploads/:uploadId/download', (req, res) => {
+firmsRouter.get('/:id/uploads/:uploadId/download', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1430,7 +1832,7 @@ firmsRouter.get('/:id/uploads/:uploadId/download', (req, res) => {
   }
 });
 
-firmsRouter.patch('/:id', (req, res) => {
+firmsRouter.patch('/:id', requireAdminOnly, (req, res) => {
   const { name, contact_name: contactName, contact_email: contactEmail, contact_phone: contactPhone, address } = req.body || {};
 
   if (!name || String(name).trim().length < 2) {
@@ -1467,7 +1869,7 @@ firmsRouter.patch('/:id', (req, res) => {
   res.json({ firm: serializeFirm(firm) });
 });
 
-firmsRouter.patch('/:id/status', (req, res) => {
+firmsRouter.patch('/:id/status', requireAdminOnly, (req, res) => {
   const { status } = req.body || {};
   const normalizedStatus = String(status || '').trim().toLowerCase();
 
@@ -1487,7 +1889,7 @@ firmsRouter.patch('/:id/status', (req, res) => {
   res.json({ firm: serializeFirm(firm) });
 });
 
-firmsRouter.delete('/:id', (req, res) => {
+firmsRouter.delete('/:id', requireAdminOnly, (req, res) => {
   const firm = db.prepare('SELECT * FROM firms WHERE id = ?').get(req.params.id);
   if (!firm) return res.status(404).json({ error: 'Firm not found' });
 

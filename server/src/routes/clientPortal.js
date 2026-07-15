@@ -1,7 +1,11 @@
+import fs from 'node:fs';
 import express from 'express';
-import { db } from '../db/db.js';
+import { db, serializeDocument, serializeField, serializeTemplate } from '../db/db.js';
+import { originalsDir, resolveInside } from '../config.js';
 import { clientDocumentUpload } from '../middleware/upload.js';
 import { openFirmDatabase } from '../services/firmDatabases.js';
+import { generateFilledPdf, validateDataAgainstFields } from '../services/pdfFill.js';
+import { getTemplateFields } from '../services/templateAccess.js';
 
 export const clientPortalRouter = express.Router();
 
@@ -39,6 +43,43 @@ function parseJson(value, fallback = {}) {
   }
 }
 
+function getPortalClaimFormAttachment(firmDb, clientId, attachmentId) {
+  return firmDb.prepare(`
+    SELECT
+      claim_form_templates.*,
+      raf_cases.case_reference,
+      raf_cases.client_id
+    FROM claim_form_templates
+    JOIN raf_cases ON raf_cases.id = claim_form_templates.case_id
+    WHERE claim_form_templates.id = ? AND raf_cases.client_id = ? AND claim_form_templates.client_portal_visible != 0
+  `).get(attachmentId, clientId);
+}
+
+function serializePortalClaimForm(row) {
+  const template = db.prepare(`
+    SELECT document_templates.*, COUNT(template_fields.id) AS field_count
+    FROM document_templates
+    LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
+    WHERE document_templates.id = ?
+    GROUP BY document_templates.id
+  `).get(row.template_id);
+  const fields = template ? getTemplateFields(template.id).map(serializeField) : [];
+  const document = row.generated_document_id
+    ? db.prepare(`
+      SELECT generated_documents.*, document_templates.name AS template_name
+      FROM generated_documents
+      JOIN document_templates ON document_templates.id = generated_documents.template_id
+      WHERE generated_documents.id = ?
+    `).get(row.generated_document_id)
+    : null;
+
+  return {
+    ...row,
+    template: template ? { ...serializeTemplate(template), fields } : null,
+    document: document ? serializeDocument(document) : null
+  };
+}
+
 function findClientPortal(token) {
   const firms = db.prepare("SELECT * FROM firms WHERE status = 'active'").all();
 
@@ -67,6 +108,8 @@ function hasPendingDocuments(firmDb, clientId) {
 }
 
 function serializePortal(firm, firmDb, client) {
+  const templateViewEnabled = client.portal_templates_visible !== 0;
+  const templateInputsEnabled = templateViewEnabled && client.portal_template_inputs_enabled !== 0;
   const cases = firmDb.prepare(`
     SELECT *
     FROM raf_cases
@@ -84,6 +127,17 @@ function serializePortal(firm, firmDb, client) {
     WHERE client_document_requests.client_id = ?
     ORDER BY client_document_requests.created_at
   `).all(client.id);
+
+  const claimForms = templateViewEnabled ? firmDb.prepare(`
+    SELECT
+      claim_form_templates.*,
+      raf_cases.case_reference,
+      raf_cases.client_id
+    FROM claim_form_templates
+    JOIN raf_cases ON raf_cases.id = claim_form_templates.case_id
+    WHERE raf_cases.client_id = ? AND claim_form_templates.client_portal_visible != 0
+    ORDER BY claim_form_templates.created_at DESC, claim_form_templates.id DESC
+  `).all(client.id).map(serializePortalClaimForm) : [];
 
   return {
     firm: {
@@ -105,8 +159,13 @@ function serializePortal(firm, firmDb, client) {
       occupation: client.occupation,
       employer_details: client.employer_details
     },
+    portal_permissions: {
+      template_view_enabled: templateViewEnabled,
+      template_inputs_enabled: templateInputsEnabled
+    },
     cases,
-    requests
+    requests,
+    claimForms
   };
 }
 
@@ -216,6 +275,80 @@ clientPortalRouter.patch('/:token/intake', (req, res) => {
 
     const client = portal.firmDb.prepare('SELECT * FROM firm_clients WHERE id = ?').get(portal.client.id);
     return res.json(serializePortal(portal.firm, portal.firmDb, client));
+  } finally {
+    portal.firmDb.close();
+  }
+});
+
+clientPortalRouter.get('/:token/forms/:attachmentId/template/pdf', (req, res) => {
+  const portal = findClientPortal(req.params.token);
+  if (!portal) return res.status(404).json({ error: 'Client portal link is invalid or expired' });
+
+  try {
+    if (portal.client.portal_templates_visible === 0) {
+      return res.status(403).json({ error: 'Template viewing is disabled for this shared link' });
+    }
+
+    const attachment = getPortalClaimFormAttachment(portal.firmDb, portal.client.id, req.params.attachmentId);
+    if (!attachment) return res.status(404).json({ error: 'Attached template form not found for this client' });
+
+    const template = db.prepare('SELECT * FROM document_templates WHERE id = ?').get(attachment.template_id);
+    if (!template) return res.status(404).json({ error: 'Template not found' });
+
+    const filePath = resolveInside(originalsDir, template.stored_filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'PDF is missing from storage' });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${template.original_filename}"`);
+    return fs.createReadStream(filePath).pipe(res);
+  } finally {
+    portal.firmDb.close();
+  }
+});
+
+clientPortalRouter.patch('/:token/forms/:attachmentId', async (req, res, next) => {
+  const portal = findClientPortal(req.params.token);
+  if (!portal) return res.status(404).json({ error: 'Client portal link is invalid or expired' });
+
+  try {
+    if (portal.client.portal_templates_visible === 0 || portal.client.portal_template_inputs_enabled === 0) {
+      return res.status(403).json({ error: 'Template input is disabled for this shared link' });
+    }
+
+    const attachment = getPortalClaimFormAttachment(portal.firmDb, portal.client.id, req.params.attachmentId);
+    if (!attachment) return res.status(404).json({ error: 'Attached template form not found for this client' });
+
+    const template = db.prepare('SELECT * FROM document_templates WHERE id = ? AND status = ?').get(attachment.template_id, 'ready');
+    if (!template) return res.status(404).json({ error: 'Template is not ready or was not found' });
+
+    const fields = getTemplateFields(template.id).map(serializeField);
+    const existingDocument = attachment.generated_document_id
+      ? db.prepare('SELECT * FROM generated_documents WHERE id = ?').get(attachment.generated_document_id)
+      : null;
+    const existingData = parseJson(existingDocument?.input_json, {});
+    const submittedData = req.body?.data && typeof req.body.data === 'object' ? req.body.data : {};
+    const data = { ...existingData, ...submittedData };
+    const errors = validateDataAgainstFields(fields, data);
+    if (errors.length) return res.status(400).json({ error: errors.join(', ') });
+
+    const document = await generateFilledPdf({
+      template,
+      fields,
+      data,
+      userId: existingDocument?.user_id || template.user_id,
+      sourceType: 'client_portal_claim_form'
+    });
+
+    portal.firmDb.prepare(`
+      UPDATE claim_form_templates
+      SET generated_document_id = ?, status = 'generated', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(document.id, attachment.id);
+
+    const client = portal.firmDb.prepare('SELECT * FROM firm_clients WHERE id = ?').get(portal.client.id);
+    return res.json(serializePortal(portal.firm, portal.firmDb, client));
+  } catch (error) {
+    return next(error);
   } finally {
     portal.firmDb.close();
   }

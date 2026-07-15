@@ -14,6 +14,7 @@ import {
   Send,
   Settings,
   ShieldCheck,
+  Stethoscope,
   Users,
   X,
 } from 'lucide-react';
@@ -44,7 +45,14 @@ export default function AppShell({ children }) {
   const firmMatch = slugFirmMatch || legacyFirmMatch;
   const firmId = firmMatch?.params?.firmId;
   const isFirmWorkspace = Boolean(firmId);
+  const assignedFirms = Array.isArray(user?.firm_access) ? user.firm_access : [];
+  const assignedFirm = firmId
+    ? assignedFirms.find((access) => (
+      String(access.firm_id) === String(firmId) || access.firm_slug === firmId
+    ))
+    : null;
   const firmBasePath = slugFirmMatch ? `/firm/${firmId}` : `/firms/${firmId}`;
+  const canUseFirmMessages = user?.role === 'admin' || Boolean(isFirmWorkspace && assignedFirm);
   const workspaceLabel = isFirmWorkspace ? firmName || 'Firm Workspace' : user?.role === 'admin' ? 'Admin Workspace' : 'Claims workspace';
   const overviewRows = messageOverview?.rows || [];
   const filteredOverviewRows = overviewRows.filter((row) => {
@@ -110,13 +118,18 @@ export default function AppShell({ children }) {
   }, [firmId]);
 
   useEffect(() => {
-    if (!notificationsOpen) return;
-    loadMessageOverview().catch((err) => setNotificationError(err.message));
-  }, [notificationsOpen, firmId]);
+    if (!notificationsOpen || !canUseFirmMessages) return;
+    if (user?.role === 'admin') {
+      loadMessageOverview().catch((err) => setNotificationError(err.message));
+    } else if (isFirmWorkspace && firmId) {
+      loadMessageThread(firmId, 'firm').catch((err) => setNotificationError(err.message));
+    }
+  }, [notificationsOpen, firmId, canUseFirmMessages, user?.role, isFirmWorkspace]);
 
   useEffect(() => {
+    if (user?.role !== 'admin') return;
     loadMessageOverview().catch(() => {});
-  }, [firmId, isFirmWorkspace]);
+  }, [firmId, isFirmWorkspace, user?.role]);
 
   useEffect(() => {
     setMobileNavOpen(false);
@@ -128,9 +141,9 @@ export default function AppShell({ children }) {
   }, [location.search]);
 
   useEffect(() => {
-    if (!notificationsOpen || !activeFirmKey) return;
+    if (!notificationsOpen || !activeFirmKey || !canUseFirmMessages) return;
     loadMessageThread(activeFirmKey, isFirmWorkspace ? 'firm' : 'admin').catch((err) => setNotificationError(err.message));
-  }, [notificationsOpen, activeFirmKey, isFirmWorkspace]);
+  }, [notificationsOpen, activeFirmKey, isFirmWorkspace, canUseFirmMessages]);
 
   async function loadMessageOverview() {
     setNotificationError('');
@@ -202,7 +215,7 @@ export default function AppShell({ children }) {
     event.preventDefault();
     const query = globalSearch.trim();
     const adminSearchPaths = ['/firms', '/billing', '/activity', '/templates', '/documents'];
-    const firmSearchPaths = [`${firmBasePath}/clients`, `${firmBasePath}/claims`, `${firmBasePath}/billing`];
+    const firmSearchPaths = [`${firmBasePath}/clients`, `${firmBasePath}/doctors`, `${firmBasePath}/claims`, `${firmBasePath}/billing`];
     const currentPath = location.pathname;
     const targetPath = isFirmWorkspace
       ? firmSearchPaths.includes(currentPath) ? currentPath : `${firmBasePath}/claims`
@@ -238,6 +251,7 @@ export default function AppShell({ children }) {
               <>
                 <NavLink to={`${firmBasePath}/workspace`}><Home size={18} /> Dashboard</NavLink>
                 <NavLink to={`${firmBasePath}/clients`}><Users size={18} /> Clients</NavLink>
+                <NavLink to={`${firmBasePath}/doctors`}><Stethoscope size={18} /> Doctors</NavLink>
                 <NavLink to={`${firmBasePath}/claims`}><BriefcaseBusiness size={18} /> Claims</NavLink>
                 <NavLink to={`${firmBasePath}/billing`}><Banknote size={18} /> Billing</NavLink>
               </>
@@ -247,6 +261,11 @@ export default function AppShell({ children }) {
                 {user?.role === 'admin' && <NavLink to="/firms"><FolderOpen size={18} /> Law firms</NavLink>}
                 {user?.role === 'admin' && <NavLink to="/billing"><Banknote size={18} /> Billing</NavLink>}
                 {user?.role === 'admin' && <NavLink to="/activity"><Activity size={18} /> Activity</NavLink>}
+                {assignedFirms.map((access) => (
+                  <NavLink to={`/firm/${access.firm_slug || access.firm_id}/workspace`} key={access.firm_id}>
+                    <BriefcaseBusiness size={18} /> {access.firm_name || 'Firm workspace'}
+                  </NavLink>
+                ))}
                 <NavLink to="/templates"><FolderOpen size={18} /> Templates</NavLink>
                 <NavLink to="/documents"><FileText size={18} /> Documents</NavLink>
               </>
@@ -281,7 +300,7 @@ export default function AppShell({ children }) {
             />
           </form>
 	          <div className="user-menu">
-	            <button
+	            {canUseFirmMessages && <button
 	              className="icon-button notification-button"
 	              type="button"
 	              title="Notifications"
@@ -290,16 +309,16 @@ export default function AppShell({ children }) {
 	            >
 	              <Bell size={18} />
 	              {notificationCount > 0 && <span>{notificationCount}</span>}
-	            </button>
-		            {notificationsOpen && (
+	            </button>}
+		            {canUseFirmMessages && notificationsOpen && (
 		              <section className="notification-panel" aria-label="Notifications and messages">
 		                <div className="notification-header">
 		                  <div className="chat-avatar" aria-hidden="true">{getInitials(chatTitle)}</div>
-		                  <div>
+		                  <div className="notification-title">
 		                    <strong>{chatTitle}</strong>
 		                    <span>{chatSubtitle}</span>
 		                  </div>
-		                  <button className="icon-button ghost" type="button" onClick={() => setNotificationsOpen(false)} aria-label="Close notifications">
+		                  <button className="icon-button notification-close" type="button" onClick={() => setNotificationsOpen(false)} aria-label="Close notifications">
 		                    <X size={16} />
 	                  </button>
 	                </div>

@@ -1,7 +1,7 @@
 export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export function getToken() {
-  return localStorage.getItem('orc_token');
+  return localStorage.getItem('orc_token') || sessionStorage.getItem('orc_token');
 }
 
 export async function apiRequest(path, options = {}) {
@@ -25,7 +25,8 @@ export async function apiRequest(path, options = {}) {
   const payload = contentType.includes('application/json') ? await response.json() : await response.text();
 
   if (!response.ok) {
-    const message = payload?.error || payload?.errors?.join(', ') || 'Request failed';
+    const textMessage = typeof payload === 'string' ? payload.trim() : '';
+    const message = payload?.error || payload?.errors?.join(', ') || textMessage || 'Request failed';
     throw new Error(message);
   }
 

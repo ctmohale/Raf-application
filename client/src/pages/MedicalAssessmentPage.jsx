@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, FileText, Save, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronUp, FileText, Maximize2, Minimize2, Save, ShieldCheck } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { ButtonSpinner } from '../components/LoadingSpinner.jsx';
+import PdfWorkspace from '../components/PdfWorkspace.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
 
@@ -30,6 +31,8 @@ export default function MedicalAssessmentPage() {
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [templateFullscreen, setTemplateFullscreen] = useState(false);
+  const [patientContextOpen, setPatientContextOpen] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -44,6 +47,15 @@ export default function MedicalAssessmentPage() {
 
   function updateAssessmentField(field, value) {
     setAssessmentForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateDocumentFieldValue(field, value) {
+    if (field.locked) return;
+    if (value === '__open_signature_pad__') {
+      setMessage('Signature fields can be completed with the typed assessment values for now.');
+      return;
+    }
+    updateAssessmentField(field.name, value);
   }
 
   async function submitAssessment(event) {
@@ -68,8 +80,15 @@ export default function MedicalAssessmentPage() {
   }
 
   return (
-    <main className="client-upload-page">
+    <main className={`client-upload-page ${templateFullscreen ? 'medical-document-fullscreen-active' : ''}`}>
       <section className="client-upload-panel medical-assessment-panel">
+        {payload && (
+          <div className="medical-access-note top-warning">
+            <ShieldCheck size={18} />
+            <span><strong>Warning:</strong> This link only opens the assigned patient assessment.</span>
+          </div>
+        )}
+
         <div className="medical-assessment-hero">
           <div className="auth-brand">
             <div className="brand-mark large"><FileText size={28} /></div>
@@ -97,17 +116,23 @@ export default function MedicalAssessmentPage() {
 
         {payload && (
           <div className="medical-assessment-view">
-            <div className="medical-access-note">
-              <ShieldCheck size={18} />
-              <span>This link only opens the assigned patient assessment.</span>
-            </div>
-
             <section className="client-intake-section medical-context-card">
               <div className="client-intake-section-title">
-                <FileText size={17} />
-                <h4>Patient context</h4>
+                <div>
+                  <FileText size={17} />
+                  <h4>Patient context</h4>
+                </div>
+                <button
+                  className="medical-context-toggle"
+                  type="button"
+                  onClick={() => setPatientContextOpen((current) => !current)}
+                  aria-expanded={patientContextOpen}
+                >
+                  {patientContextOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                  <span>{patientContextOpen ? 'Hide' : 'Show'}</span>
+                </button>
               </div>
-              <div className="medical-readonly-grid">
+              {patientContextOpen && <div className="medical-readonly-grid">
                 <div>
                   <span>Patient</span>
                   <strong>{payload.patient.first_name} {payload.patient.surname}</strong>
@@ -132,58 +157,95 @@ export default function MedicalAssessmentPage() {
                   <span>Collision details</span>
                   <strong>{payload.claim.collision_description || '-'}</strong>
                 </div>
-              </div>
+              </div>}
             </section>
 
-            <form className="client-documents-panel medical-assessment-form" onSubmit={submitAssessment}>
-              <div className="medical-request-heading">
+            <form className={`client-documents-panel medical-assessment-form ${payload.template ? 'template-form' : ''} ${templateFullscreen ? 'fullscreen' : ''}`} onSubmit={submitAssessment}>
+              <div className="medical-form-heading">
                 <div>
-                  <span className="eyebrow">Request</span>
-                  <h3>{payload.assessment.report_label}</h3>
-                  <p>{payload.assessment.deadline ? `Due ${formatDate(payload.assessment.deadline)}` : 'No deadline set'}</p>
+                  <span className="eyebrow">Medical report</span>
+                  <h3>{payload.template ? 'Fill on document' : 'Assessment details'}</h3>
+                  <p>
+                    {payload.template
+                      ? `${payload.template.name} · ${payload.template.fields?.length || 0} inputs`
+                      : 'Complete the clinical information for this assigned patient.'}
+                  </p>
                 </div>
-                <span className={`medical-status-pill ${payload.assessment.status}`}>{payload.assessment.status}</span>
+                <div className="medical-form-heading-actions">
+                  <div className="medical-inline-request">
+                    <div>
+                      <strong>{payload.assessment.report_label}</strong>
+                      <small>{payload.assessment.deadline ? `Due ${formatDate(payload.assessment.deadline)}` : 'No deadline set'}</small>
+                    </div>
+                  </div>
+                  <button className="primary-button medical-header-submit" disabled={saving}>
+                    {saving ? <ButtonSpinner label="Submitting..." /> : payload.assessment.status === 'submitted' ? <CheckCircle2 size={16} /> : <Save size={16} />}
+                    {!saving && (payload.assessment.status === 'submitted' ? 'Update' : 'Submit')}
+                  </button>
+                  {payload.template && (
+                    <button
+                      className="icon-button ghost"
+                      type="button"
+                      onClick={() => setTemplateFullscreen((current) => !current)}
+                      title={templateFullscreen ? 'Exit full screen' : 'Open document in full screen'}
+                      aria-label={templateFullscreen ? 'Exit document full screen' : 'Open document in full screen'}
+                    >
+                      {templateFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="client-intake-grid">
-                <label>
-                  Examination date
-                  <input type="date" value={assessmentForm.examination_date} onChange={(event) => updateAssessmentField('examination_date', event.target.value)} />
-                </label>
-                <label>
-                  Diagnosis
-                  <input value={assessmentForm.diagnosis} onChange={(event) => updateAssessmentField('diagnosis', event.target.value)} placeholder="Primary diagnosis" />
-                </label>
-                <label className="span-2">
-                  Injuries
-                  <textarea value={assessmentForm.injuries} onChange={(event) => updateAssessmentField('injuries', event.target.value)} placeholder="List injuries related to the accident" />
-                </label>
-                <label className="span-2">
-                  Clinical findings
-                  <textarea value={assessmentForm.clinical_findings} onChange={(event) => updateAssessmentField('clinical_findings', event.target.value)} placeholder="Assessment findings" />
-                </label>
-                <label className="span-2">
-                  Treatment
-                  <textarea value={assessmentForm.treatment} onChange={(event) => updateAssessmentField('treatment', event.target.value)} placeholder="Treatment already given or required" />
-                </label>
-                <label>
-                  Impairment
-                  <input value={assessmentForm.impairment} onChange={(event) => updateAssessmentField('impairment', event.target.value)} placeholder="If applicable" />
-                </label>
-                <label>
-                  Recommendations
-                  <input value={assessmentForm.recommendations} onChange={(event) => updateAssessmentField('recommendations', event.target.value)} placeholder="Follow-up or specialist care" />
-                </label>
-                <label className="span-2">
-                  Notes
-                  <textarea value={assessmentForm.notes} onChange={(event) => updateAssessmentField('notes', event.target.value)} placeholder="Any other relevant medical notes" />
-                </label>
-              </div>
+              {payload.template ? (
+                <div className="medical-template-preview">
+                  <PdfWorkspace
+                    pdfPath={`/api/medical-assessments/${token}/template/pdf`}
+                    fields={payload.template.fields || []}
+                    onFieldsChange={() => {}}
+                    selectedFieldId={null}
+                    onSelectField={() => {}}
+                    entryMode
+                    onEntryValueChange={updateDocumentFieldValue}
+                    values={assessmentForm}
+                  />
+                </div>
+              ) : (
+                <div className="client-intake-grid">
+                  <label>
+                    Examination date
+                    <input type="date" value={assessmentForm.examination_date} onChange={(event) => updateAssessmentField('examination_date', event.target.value)} />
+                  </label>
+                  <label>
+                    Diagnosis
+                    <input value={assessmentForm.diagnosis} onChange={(event) => updateAssessmentField('diagnosis', event.target.value)} placeholder="Primary diagnosis" />
+                  </label>
+                  <label className="span-2">
+                    Injuries
+                    <textarea value={assessmentForm.injuries} onChange={(event) => updateAssessmentField('injuries', event.target.value)} placeholder="List injuries related to the accident" />
+                  </label>
+                  <label className="span-2">
+                    Clinical findings
+                    <textarea value={assessmentForm.clinical_findings} onChange={(event) => updateAssessmentField('clinical_findings', event.target.value)} placeholder="Assessment findings" />
+                  </label>
+                  <label className="span-2">
+                    Treatment
+                    <textarea value={assessmentForm.treatment} onChange={(event) => updateAssessmentField('treatment', event.target.value)} placeholder="Treatment already given or required" />
+                  </label>
+                  <label>
+                    Impairment
+                    <input value={assessmentForm.impairment} onChange={(event) => updateAssessmentField('impairment', event.target.value)} placeholder="If applicable" />
+                  </label>
+                  <label>
+                    Recommendations
+                    <input value={assessmentForm.recommendations} onChange={(event) => updateAssessmentField('recommendations', event.target.value)} placeholder="Follow-up or specialist care" />
+                  </label>
+                  <label className="span-2">
+                    Notes
+                    <textarea value={assessmentForm.notes} onChange={(event) => updateAssessmentField('notes', event.target.value)} placeholder="Any other relevant medical notes" />
+                  </label>
+                </div>
+              )}
 
-              <button className="primary-button" disabled={saving}>
-                {saving ? <ButtonSpinner label="Submitting..." /> : payload.assessment.status === 'submitted' ? <CheckCircle2 size={17} /> : <Save size={17} />}
-                {!saving && (payload.assessment.status === 'submitted' ? 'Update assessment' : 'Submit assessment')}
-              </button>
             </form>
           </div>
         )}

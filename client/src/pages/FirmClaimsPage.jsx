@@ -1,110 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { BellRing, BriefcaseBusiness, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Maximize2, Minimize2, Search, Send, Sparkles, Trash2, Type, UploadCloud, X } from 'lucide-react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { BellRing, BriefcaseBusiness, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Mail, Maximize2, MessageCircle, Minimize2, Plus, Search, Send, Share2, Sparkles, Trash2, Type, UploadCloud, X } from 'lucide-react';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ButtonSpinner, LoadingSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
+import SignatureInput from '../components/SignatureInput.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { API_BASE, apiRequest, downloadDocument, getToken } from '../lib/api.js';
-
-function SignatureInput({ id, value, onChange }) {
-  const canvasRef = useRef(null);
-  const drawingRef = useRef(false);
-  const hasInkRef = useRef(false);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext('2d');
-    context.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!String(value || '').startsWith('data:image/')) {
-      const textValue = String(value || '').trim();
-      if (textValue) {
-        context.font = '52px "Brush Script MT", "Segoe Script", "Lucida Handwriting", cursive';
-        context.fillStyle = '#031426';
-        context.fillText(textValue, 24, 112, canvas.width - 48);
-        hasInkRef.current = true;
-      }
-      return;
-    }
-
-    const image = new Image();
-    image.onload = () => {
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      hasInkRef.current = true;
-    };
-    image.src = value;
-  }, [value]);
-
-  function getPoint(event) {
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((event.clientY - rect.top) / rect.height) * canvas.height
-    };
-  }
-
-  function startDrawing(event) {
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    const point = getPoint(event);
-    drawingRef.current = true;
-    hasInkRef.current = true;
-    canvas.setPointerCapture(event.pointerId);
-    context.beginPath();
-    context.moveTo(point.x, point.y);
-  }
-
-  function draw(event) {
-    if (!drawingRef.current) return;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    const point = getPoint(event);
-    context.lineTo(point.x, point.y);
-    context.strokeStyle = '#031426';
-    context.lineWidth = 4;
-    context.lineCap = 'round';
-    context.lineJoin = 'round';
-    context.stroke();
-  }
-
-  function stopDrawing(event) {
-    if (!drawingRef.current) return;
-    const canvas = canvasRef.current;
-    drawingRef.current = false;
-    if (event.pointerId && canvas.hasPointerCapture(event.pointerId)) {
-      canvas.releasePointerCapture(event.pointerId);
-    }
-    onChange(hasInkRef.current ? canvas.toDataURL('image/png') : '');
-  }
-
-  function clearSignature() {
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    hasInkRef.current = false;
-    onChange('');
-  }
-
-  return (
-    <div className="claim-form-signature-pad">
-      <canvas
-        ref={canvasRef}
-        width="720"
-        height="180"
-        onPointerDown={startDrawing}
-        onPointerMove={draw}
-        onPointerUp={stopDrawing}
-        onPointerCancel={stopDrawing}
-        aria-label="Handwritten signature input"
-      />
-      <input tabIndex={-1} aria-hidden="true" className="signature-hidden-input" id={id} value={value || ''} onChange={() => {}} />
-      <button type="button" onClick={clearSignature}>Clear</button>
-    </div>
-  );
-}
 
 function isGenericFieldLabel(label) {
   return /^field\s*\d+$/i.test(String(label || '').trim());
@@ -355,11 +256,16 @@ const emptyMedicalAssessmentForm = {
   doctor_email: '',
   doctor_phone: '',
   deadline: '',
-  delivery_method: 'link'
+  delivery_method: 'link',
+  inherit_client_information: true,
+  lock_prefilled_fields: true,
+  hide_prefilled_fields: false
 };
 
 export default function FirmClaimsPage() {
   const { id } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [workspace, setWorkspace] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -370,9 +276,12 @@ export default function FirmClaimsPage() {
   const [uploadingRequestId, setUploadingRequestId] = useState(null);
   const [viewingRequestId, setViewingRequestId] = useState(null);
   const [intakeCase, setIntakeCase] = useState(null);
+  const [shareCase, setShareCase] = useState(null);
   const [medicalReportCase, setMedicalReportCase] = useState(null);
   const [medicalAssessmentForm, setMedicalAssessmentForm] = useState(emptyMedicalAssessmentForm);
+  const [currentMedicalAssessmentRequest, setCurrentMedicalAssessmentRequest] = useState(null);
   const [creatingMedicalAssessment, setCreatingMedicalAssessment] = useState(false);
+  const [refreshingMedicalInformation, setRefreshingMedicalInformation] = useState(false);
   const [claimFormsCase, setClaimFormsCase] = useState(null);
   const [formFilesCase, setFormFilesCase] = useState(null);
   const [claimFormsPayload, setClaimFormsPayload] = useState(null);
@@ -398,6 +307,7 @@ export default function FirmClaimsPage() {
   const [creatingClaim, setCreatingClaim] = useState(false);
   const [copiedClientId, setCopiedClientId] = useState(null);
   const [copiedMedicalRequestId, setCopiedMedicalRequestId] = useState(null);
+  const [savingPortalSettings, setSavingPortalSettings] = useState(false);
 
   useEffect(() => {
     apiRequest(`/api/firms/${id}/workspace`)
@@ -422,6 +332,7 @@ export default function FirmClaimsPage() {
   const medicalAssessmentRequests = workspace?.medicalAssessmentRequests || [];
   const claimForms = workspace?.claimForms || [];
   const clientOptions = workspace?.clients || [];
+  const firmDoctorOptions = (workspace?.doctors || []).filter((doctor) => doctor.status === 'active');
   const filteredCases = cases.filter((caseRecord) => {
     const searchText = [
       caseRecord.case_reference,
@@ -447,7 +358,8 @@ export default function FirmClaimsPage() {
     groups[key].push(request);
     return groups;
   }, {});
-  const activeMedicalAssessmentRequest = medicalReportCase ? getMedicalAssessmentRequest(medicalReportCase) : null;
+  const activeMedicalAssessmentRequest = currentMedicalAssessmentRequest || (medicalReportCase ? getMedicalAssessmentRequest(medicalReportCase) : null);
+  const activeMedicalAssessmentSecureUrl = activeMedicalAssessmentRequest ? getMedicalAssessmentSecureUrl(activeMedicalAssessmentRequest) : '';
   const claimFormsByCase = claimForms.reduce((groups, form) => {
     const key = form.case_id;
     groups[key] = groups[key] || [];
@@ -460,6 +372,20 @@ export default function FirmClaimsPage() {
   const newClaimFormSelection = getNewClaimFormSelection(newClaimForm.accident_date, newClaimForm.general_damages);
   const newClaimLodgementDeadline = newClaimForm.accident_date ? addYearsMinusOneDay(newClaimForm.accident_date, 3) : '';
   const newClaimInternalDeadline = newClaimLodgementDeadline ? subtractMonths(newClaimLodgementDeadline, 3) : '';
+  const shareClient = shareCase ? getCaseClient(shareCase) : null;
+  const shareUrl = shareClient?.invite_url || '';
+  const shareClientName = shareCase ? `${shareCase.first_name} ${shareCase.surname}` : 'client';
+  const shareTemplateOptions = shareCase ? getAttachedClaimForms(shareCase) : [];
+  const shareMessageText = shareUrl
+    ? `Hi ${shareCase.first_name}, please use this secure RAFFlow link to add or submit your RAF information and documents: ${shareUrl}`
+    : '';
+  const shareEmailSubject = shareCase ? `RAF information request - ${shareClientName}` : 'RAF information request';
+  const shareEmailUrl = shareUrl
+    ? `mailto:${encodeURIComponent(shareClient?.email || '')}?subject=${encodeURIComponent(shareEmailSubject)}&body=${encodeURIComponent(`${shareMessageText}\n\nRegards\n${workspace?.firm?.name || 'RAFFlow'}`)}`
+    : '';
+  const shareWhatsAppUrl = shareUrl
+    ? `https://wa.me/${formatWhatsAppPhone(shareClient?.cell)}?text=${encodeURIComponent(shareMessageText)}`
+    : '';
 
   function getClaimFormCount(caseRecord) {
     return Number(caseRecord.form_count ?? claimFormsByCase[caseRecord.id]?.length ?? 0);
@@ -471,6 +397,13 @@ export default function FirmClaimsPage() {
 
   function getCaseClient(caseRecord) {
     return clientOptions.find((client) => String(client.id) === String(caseRecord?.client_id)) || null;
+  }
+
+  function formatWhatsAppPhone(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('0')) return `27${digits.slice(1)}`;
+    return digits;
   }
 
   function formatCompactReference(reference) {
@@ -529,8 +462,18 @@ export default function FirmClaimsPage() {
     return medicalAssessmentsByCase[caseRecord.id]?.[0] || null;
   }
 
+  function getMedicalAssessmentSecureUrl(request) {
+    const token = String(request?.secure_token || '').trim();
+    if (token) return `${window.location.origin}/medical-assessment/${encodeURIComponent(token)}`;
+
+    return String(request?.secure_url || '').trim();
+  }
+
   function openMedicalAssessment(caseRecord) {
     const currentRequest = getMedicalAssessmentRequest(caseRecord);
+    setError('');
+    setMessage('');
+    setCurrentMedicalAssessmentRequest(currentRequest || null);
     setMedicalAssessmentForm(currentRequest ? {
       report_type: currentRequest.report_type || 'supporting_medical_report',
       doctor_name: currentRequest.doctor_name || '',
@@ -538,7 +481,10 @@ export default function FirmClaimsPage() {
       doctor_email: currentRequest.doctor_email || '',
       doctor_phone: currentRequest.doctor_phone || '',
       deadline: currentRequest.deadline || '',
-      delivery_method: currentRequest.delivery_method || 'email'
+      delivery_method: currentRequest.delivery_method || 'email',
+      inherit_client_information: currentRequest.inherit_client_information !== false && currentRequest.inherit_client_information !== 0,
+      lock_prefilled_fields: currentRequest.lock_prefilled_fields !== false && currentRequest.lock_prefilled_fields !== 0,
+      hide_prefilled_fields: Boolean(currentRequest.hide_prefilled_fields)
     } : emptyMedicalAssessmentForm);
     setMedicalReportCase(caseRecord);
   }
@@ -547,12 +493,25 @@ export default function FirmClaimsPage() {
     setMedicalAssessmentForm((current) => ({ ...current, [field]: value }));
   }
 
+  function applySavedDoctor(doctorId) {
+    const doctor = firmDoctorOptions.find((entry) => String(entry.id) === String(doctorId));
+    if (!doctor) return;
+    setMedicalAssessmentForm((current) => ({
+      ...current,
+      doctor_name: doctor.full_name || '',
+      practice_number: doctor.practice_number || '',
+      doctor_email: doctor.email || '',
+      doctor_phone: doctor.phone || ''
+    }));
+  }
+
   function closeMedicalAssessment() {
     setMedicalReportCase(null);
+    setCurrentMedicalAssessmentRequest(null);
     setMedicalAssessmentForm(emptyMedicalAssessmentForm);
   }
 
-  async function createMedicalAssessment(event) {
+  async function saveMedicalAssessment(event) {
     event.preventDefault();
     if (!medicalReportCase) return;
     setCreatingMedicalAssessment(true);
@@ -560,12 +519,18 @@ export default function FirmClaimsPage() {
     setMessage('');
 
     try {
-      const result = await apiRequest(`/api/firms/${id}/claims/${medicalReportCase.id}/medical-assessments`, {
-        method: 'POST',
+      const existingRequestId = activeMedicalAssessmentRequest?.id;
+      const result = await apiRequest(`/api/firms/${id}/claims/${medicalReportCase.id}/medical-assessments${existingRequestId ? `/${existingRequestId}` : ''}`, {
+        method: existingRequestId ? 'PATCH' : 'POST',
         body: medicalAssessmentForm
       });
       setWorkspace(result.workspace);
-      setMessage(`Medical assessment request created for ${medicalAssessmentForm.doctor_name}.${result.delivery?.sent ? ' Secure link sent.' : ' Copy the secure link to share it.'}`);
+      if (result.request) {
+        setCurrentMedicalAssessmentRequest(result.request);
+      }
+      setMessage(existingRequestId
+        ? 'Medical assessment request updated.'
+        : `Medical assessment request created for ${medicalAssessmentForm.doctor_name}.${result.delivery?.sent ? ' Secure link sent.' : ' Copy the secure link to share it.'}`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -573,12 +538,117 @@ export default function FirmClaimsPage() {
     }
   }
 
-  async function copyMedicalAssessmentLink(request) {
-    if (!request?.secure_url) return;
-    await navigator.clipboard.writeText(request.secure_url);
-    setCopiedMedicalRequestId(request.id);
-    setMessage('Secure doctor link copied.');
+  async function refreshMedicalSentInformation() {
+    if (!medicalReportCase || !activeMedicalAssessmentRequest?.id) return;
+    setRefreshingMedicalInformation(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const result = await apiRequest(`/api/firms/${id}/claims/${medicalReportCase.id}/medical-assessments/${activeMedicalAssessmentRequest.id}`, {
+        method: 'PATCH',
+        body: {
+          ...medicalAssessmentForm,
+          refresh_inherited_information: true
+        }
+      });
+      setWorkspace(result.workspace);
+      if (result.request) {
+        setCurrentMedicalAssessmentRequest(result.request);
+      }
+      setMessage('Sent client and document information refreshed for this doctor link.');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRefreshingMedicalInformation(false);
+    }
+  }
+
+  function markMedicalAssessmentLinkCopied(requestId) {
+    setCopiedMedicalRequestId(requestId);
+    setMessage('Secure medical link copied.');
     setTimeout(() => setCopiedMedicalRequestId(null), 1800);
+  }
+
+  async function copyMedicalAssessmentLink(request) {
+    const secureUrl = getMedicalAssessmentSecureUrl(request);
+    if (!secureUrl) {
+      setError('No secure medical link is available yet. Generate the link first.');
+      return;
+    }
+
+    try {
+      copyMedicalAssessmentVisibleInput(request.id);
+      markMedicalAssessmentLinkCopied(request.id);
+      return;
+    } catch (err) {
+      // Try the detached field fallback next.
+    }
+
+    try {
+      copyTextWithSelectionFallback(secureUrl);
+      markMedicalAssessmentLinkCopied(request.id);
+      return;
+    } catch (err) {
+      // Try the Clipboard API last because it is restricted outside secure contexts.
+    }
+
+    try {
+      if (!window.isSecureContext || !navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(secureUrl);
+      markMedicalAssessmentLinkCopied(request.id);
+    } catch (err) {
+      selectMedicalAssessmentVisibleInput(request.id);
+      setError('Could not copy automatically. The secure link is selected so you can copy it manually.');
+    }
+  }
+
+  function openMedicalAssessmentLink(request) {
+    const secureUrl = getMedicalAssessmentSecureUrl(request);
+    if (!secureUrl) {
+      setError('No secure medical link is available yet. Generate the link first.');
+      return;
+    }
+    window.open(secureUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  function getMedicalAssessmentLinkInput(requestId) {
+    return document.querySelector(`[data-medical-link-input="${requestId}"]`);
+  }
+
+  function selectMedicalAssessmentVisibleInput(requestId) {
+    const input = getMedicalAssessmentLinkInput(requestId);
+    if (!input) return false;
+    input.focus();
+    input.select();
+    try {
+      input.setSelectionRange(0, input.value.length);
+    } catch {
+      // Some input types do not support setSelectionRange.
+    }
+    return true;
+  }
+
+  function copyMedicalAssessmentVisibleInput(requestId) {
+    if (!selectMedicalAssessmentVisibleInput(requestId)) throw new Error('Link input not found');
+    const copied = document.execCommand('copy');
+    if (!copied) throw new Error('Visible input copy failed');
+  }
+
+  function copyTextWithSelectionFallback(value) {
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (!copied) throw new Error('Copy command failed');
   }
 
   function updateNewClaimField(field, value) {
@@ -704,6 +774,71 @@ export default function FirmClaimsPage() {
       window.setTimeout(() => setCopiedClientId(null), 1800);
     } catch {
       setError('Unable to copy link. Open the client record and copy the invite link manually.');
+    }
+  }
+
+  function openShareModal(caseRecord) {
+    const client = getCaseClient(caseRecord);
+    if (!client?.invite_url) {
+      setError('Client intake link is not available for this claim.');
+      return;
+    }
+
+    setError('');
+    setMessage('');
+    setShareCase(caseRecord);
+  }
+
+  async function updateClientPortalSettings(patch) {
+    if (!shareCase) return;
+    const client = getCaseClient(shareCase);
+    if (!client) return;
+
+    const nextSettings = {
+      portal_templates_visible: client.portal_templates_visible !== false,
+      portal_template_inputs_enabled: client.portal_template_inputs_enabled !== false,
+      ...patch
+    };
+
+    if (nextSettings.portal_templates_visible === false) {
+      nextSettings.portal_template_inputs_enabled = false;
+    }
+
+    setSavingPortalSettings(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const result = await apiRequest(`/api/firms/${id}/clients/${client.id}/portal-settings`, {
+        method: 'PATCH',
+        body: nextSettings
+      });
+      setWorkspace(result.workspace);
+      setMessage('Shared link settings updated.');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingPortalSettings(false);
+    }
+  }
+
+  async function updateSharedTemplate(form, visible) {
+    if (!shareCase) return;
+    setSavingPortalSettings(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const result = await apiRequest(`/api/firms/${id}/claims/${shareCase.id}/forms/${form.id}/share`, {
+        method: 'PATCH',
+        body: { client_portal_visible: visible }
+      });
+      setWorkspace(result.workspace);
+      setMessage(`${form.template?.name || 'Template'} ${visible ? 'added to' : 'removed from'} the shared link.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingPortalSettings(false);
     }
   }
 
@@ -1048,41 +1183,6 @@ export default function FirmClaimsPage() {
     return isSignatureInputField(field) ? `${field.name}__field_${field.id}` : field.name;
   }
 
-  function isMedicalTemplateField(field, fields = editFormFields) {
-    const label = normalizeSectionText(getReadableFieldLabel(field, fields));
-    const section = normalizeSectionText(getEditFormSectionTitle(field));
-
-    if (
-      section.includes('medical practitioner')
-      || section.includes('non serious injuries')
-      || section.includes('accident and treatment')
-      || section.includes('current symptoms')
-      || section.includes('diagnosis')
-      || section.includes('examination')
-      || section.includes('apportionment')
-      || section.includes('exceptions')
-    ) {
-      return true;
-    }
-
-    return (
-      label.includes('medical practitioner')
-      || label.includes('description of injury')
-      || label.includes('describe the nature')
-      || label.includes('medical treatment')
-      || label.includes('current symptoms')
-      || label.includes('complaints')
-      || label.includes('diagnosis')
-      || label.includes('physical examination')
-      || label.includes('diagnostic studies')
-      || label.includes('medical history')
-      || label.includes('social and personal history')
-      || label.includes('educational and occupational')
-      || label.includes('apportionment')
-      || label.includes('evaluator')
-    );
-  }
-
   function buildEditFormPreview(fields, values) {
     const previewValues = { ...values };
     const previewFields = [];
@@ -1090,9 +1190,8 @@ export default function FirmClaimsPage() {
     fields.forEach((field) => {
       const readableLabel = getReadableFieldLabel(field, fields);
       const valueKey = getEditFormValueKey(field);
-      const medicalBlocked = isMedicalTemplateField(field, fields);
       if (field.field_type !== 'repeatable') {
-        previewFields.push({ ...field, label: readableLabel, source_value_key: valueKey, medical_blocked: medicalBlocked });
+        previewFields.push({ ...field, label: readableLabel, source_value_key: valueKey });
         return;
       }
 
@@ -1119,7 +1218,6 @@ export default function FirmClaimsPage() {
           field_type: 'text',
           required: Boolean(field.required) && index === 0,
           default_value: '',
-          medical_blocked: medicalBlocked,
           source_value_key: valueKey,
           source_line_index: index,
           source_line_count: inputCount
@@ -1244,7 +1342,6 @@ export default function FirmClaimsPage() {
   }
 
   function updateDocumentFieldValue(field, nextValue) {
-    if (field.medical_blocked) return;
     if (nextValue === '__open_signature_pad__') {
       setEditingSignatureField(field);
       return;
@@ -1429,6 +1526,14 @@ export default function FirmClaimsPage() {
     }
   }
 
+  function openClientOnboarding() {
+    const basePath = location.pathname.startsWith('/firms/') ? '/firms' : '/firm';
+    navigate({
+      pathname: `${basePath}/${id}/clients`,
+      search: '?action=onboard-client'
+    });
+  }
+
   return (
     <section className="page-stack">
       <div className="section-header">
@@ -1436,10 +1541,6 @@ export default function FirmClaimsPage() {
           <h2>Claims</h2>
           <p>RAF matters and document intake for {workspace?.firm?.name || 'this firm'}.</p>
         </div>
-        <button className="primary-button" type="button" onClick={() => setClaimModalOpen(true)}>
-          <FilePlus2 size={17} />
-          Create New RAF Claim
-        </button>
       </div>
 
       <StatusMessage type="error">{error}</StatusMessage>
@@ -1497,6 +1598,10 @@ export default function FirmClaimsPage() {
                 <p>Recent matters opened in this firm database.</p>
               </div>
               <div className="firm-table-tools">
+                <button className="primary-button" type="button" onClick={openClientOnboarding}>
+                  <Plus size={17} />
+                  Onboard client
+                </button>
                 <label className="table-search" aria-label="Search RAF claims">
                   <Search size={16} />
                   <input
@@ -1625,14 +1730,22 @@ export default function FirmClaimsPage() {
 	                              >
 	                                <FolderOpen size={15} />
 	                              </button>
-	                              <button
-	                                type="button"
-	                                onClick={() => sendReminder(caseRecord)}
+                              <button
+                                type="button"
+                                onClick={() => sendReminder(caseRecord)}
                                 disabled={remindingClientId === caseRecord.client_id}
                                 title="Send document upload reminder"
                                 aria-label={`Send reminder to ${caseRecord.first_name} ${caseRecord.surname}`}
                               >
                                 {remindingClientId === caseRecord.client_id ? <LoadingSpinner size="sm" label="Sending reminder..." /> : <BellRing size={15} />}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openShareModal(caseRecord)}
+                                title="Share client intake link"
+                                aria-label={`Share intake link for ${caseRecord.first_name} ${caseRecord.surname}`}
+                              >
+                                <Share2 size={15} />
                               </button>
                               <button
                                 type="button"
@@ -1949,11 +2062,17 @@ export default function FirmClaimsPage() {
                   </button>
                 </div>
 
+                {error && (
+                  <div className="medical-modal-status">
+                    <StatusMessage type="error">{error}</StatusMessage>
+                  </div>
+                )}
+
                 <div className="medical-request-layout">
-                  <form className="medical-request-form" onSubmit={createMedicalAssessment}>
+                  <form className="medical-request-form" onSubmit={saveMedicalAssessment}>
                     <div className="medical-request-card-head">
-                      <strong>Doctor request</strong>
-                      <span>Assigned patient only</span>
+                      <strong>Request details</strong>
+                      <span>Patient only</span>
                     </div>
                     <div className="form-grid">
                       <label className="span-2">
@@ -1962,6 +2081,19 @@ export default function FirmClaimsPage() {
                           {medicalReportTypes.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
                         </select>
                       </label>
+                      {firmDoctorOptions.length > 0 && (
+                        <label className="span-2">
+                          Saved doctor
+                          <select defaultValue="" onChange={(event) => applySavedDoctor(event.target.value)}>
+                            <option value="">Choose saved doctor</option>
+                            {firmDoctorOptions.map((doctor) => (
+                              <option value={doctor.id} key={doctor.id}>
+                                {doctor.full_name}{doctor.specialty ? ` · ${doctor.specialty}` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
                       <label>
                         Doctor name
                         <input value={medicalAssessmentForm.doctor_name} onChange={(event) => updateMedicalAssessmentField('doctor_name', event.target.value)} placeholder="Dr full name" required />
@@ -1990,50 +2122,196 @@ export default function FirmClaimsPage() {
                           <option value="sms">SMS</option>
                         </select>
                       </label>
+                      <details className="medical-link-options span-2">
+                        <summary className="medical-link-options-head">
+                          <div>
+                            <strong>Access controls</strong>
+                            <span>Inherited data, locked fields, and hidden prefilled inputs.</span>
+                          </div>
+                        </summary>
+                        <div className="medical-link-options-body">
+                          <label className="checkbox-line">
+                            <input
+                              type="checkbox"
+                              checked={medicalAssessmentForm.inherit_client_information}
+                              onChange={(event) => updateMedicalAssessmentField('inherit_client_information', event.target.checked)}
+                            />
+                            Inherit client information
+                          </label>
+                          <label className="checkbox-line">
+                            <input
+                              type="checkbox"
+                              checked={medicalAssessmentForm.lock_prefilled_fields}
+                              onChange={(event) => updateMedicalAssessmentField('lock_prefilled_fields', event.target.checked)}
+                              disabled={!medicalAssessmentForm.inherit_client_information}
+                            />
+                            Lock prefilled inputs
+                          </label>
+                          <label className="checkbox-line">
+                            <input
+                              type="checkbox"
+                              checked={medicalAssessmentForm.hide_prefilled_fields}
+                              onChange={(event) => updateMedicalAssessmentField('hide_prefilled_fields', event.target.checked)}
+                              disabled={!medicalAssessmentForm.inherit_client_information}
+                            />
+                            Mark hidden prefilled inputs
+                          </label>
+                          {activeMedicalAssessmentRequest && (
+                            <button
+                              className="secondary-button medical-refresh-info-button"
+                              type="button"
+                              onClick={refreshMedicalSentInformation}
+                              disabled={refreshingMedicalInformation || creatingMedicalAssessment || !medicalAssessmentForm.inherit_client_information}
+                            >
+                              {refreshingMedicalInformation ? <ButtonSpinner label="Refreshing..." /> : <Sparkles size={15} />}
+                              {!refreshingMedicalInformation && 'Refresh sent data'}
+                            </button>
+                          )}
+                        </div>
+                      </details>
                     </div>
                     <div className="modal-actions">
                       <button className="secondary-button" type="button" onClick={closeMedicalAssessment}>Cancel</button>
-                      <button className="primary-button" disabled={creatingMedicalAssessment}>
-                        {creatingMedicalAssessment ? <ButtonSpinner label="Creating..." /> : medicalAssessmentForm.delivery_method === 'link' ? <Copy size={17} /> : <Send size={17} />}
-                        {!creatingMedicalAssessment && (medicalAssessmentForm.delivery_method === 'link' ? 'Generate link' : 'Create request')}
+                      <button
+                        className="primary-button"
+                        type="submit"
+                        disabled={creatingMedicalAssessment}
+                      >
+                        {creatingMedicalAssessment ? <ButtonSpinner label={activeMedicalAssessmentRequest ? 'Updating...' : 'Creating...'} /> : medicalAssessmentForm.delivery_method === 'link' ? <Copy size={17} /> : <Send size={17} />}
+                        {!creatingMedicalAssessment && (activeMedicalAssessmentRequest ? 'Update request' : (medicalAssessmentForm.delivery_method === 'link' ? 'Generate link' : 'Create request'))}
                       </button>
                     </div>
                   </form>
 
                   <div className="medical-workflow-card">
                     <div className="medical-access-heading">
-                      <h4>Doctor access</h4>
+                      <h4>Secure link</h4>
                       <span>Limited</span>
                     </div>
-                    <ul>
-                      <li>Secure link for one assigned patient.</li>
-                      <li>Patient and accident details only.</li>
-                      <li>Share link by email, SMS, or manually.</li>
-                      <li>Doctor completes, signs, and submits.</li>
-                    </ul>
-                    <p>Doctor link cannot open the firm database.</p>
-                  </div>
-
-                  {activeMedicalAssessmentRequest && (
-                    <div className="medical-request-summary">
-                      <span className="status-pill pending">{activeMedicalAssessmentRequest.status}</span>
-                      <div>
+                    {activeMedicalAssessmentRequest && (
+                      <div className="medical-link-summary">
                         <strong>{getMedicalReportTypeLabel(activeMedicalAssessmentRequest.report_type)}</strong>
                         <small>
-                          {activeMedicalAssessmentRequest.doctor_name}
+                          {activeMedicalAssessmentRequest.doctor_name || 'Assigned doctor'}
                           {activeMedicalAssessmentRequest.deadline ? ` · Due ${formatDisplayDate(activeMedicalAssessmentRequest.deadline)}` : ''}
                         </small>
                       </div>
-                      <button className="claim-form-view-button" type="button" onClick={() => copyMedicalAssessmentLink(activeMedicalAssessmentRequest)}>
-                        {copiedMedicalRequestId === activeMedicalAssessmentRequest.id ? 'Copied' : 'Copy link'}
-                      </button>
-                    </div>
-                  )}
+                    )}
+                    {activeMedicalAssessmentSecureUrl && (
+                      <div className="medical-generated-link-card">
+                        <label className="medical-request-link-field">
+                          <span>Link</span>
+                          <input
+                            type="text"
+                            value={activeMedicalAssessmentSecureUrl}
+                            readOnly
+                            data-medical-link-input={activeMedicalAssessmentRequest.id}
+                            onFocus={(event) => event.target.select()}
+                          />
+                        </label>
+                        <div className="medical-generated-link-actions">
+                          <button className="medical-copy-link-button" type="button" onClick={() => copyMedicalAssessmentLink(activeMedicalAssessmentRequest)}>
+                            <Copy size={14} />
+                            <span>{copiedMedicalRequestId === activeMedicalAssessmentRequest.id ? 'Copied' : 'Copy link'}</span>
+                          </button>
+                          <button className="medical-copy-link-button secondary" type="button" onClick={() => openMedicalAssessmentLink(activeMedicalAssessmentRequest)}>
+                            <Eye size={14} />
+                            <span>Open</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <p>Patient-only link. No firm database access.</p>
+                  </div>
                 </div>
               </section>
             </div>
           )}
-	          {intakeCase && (
+          {shareCase && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="modal-panel share-intake-modal" role="dialog" aria-modal="true" aria-labelledby="share-intake-title">
+                <div className="modal-header">
+                  <div>
+                    <h3 id="share-intake-title">Share client intake link</h3>
+                    <p>{shareClientName} - {shareCase.case_reference}</p>
+                  </div>
+                  <button className="icon-button ghost" type="button" onClick={() => setShareCase(null)} aria-label="Close share modal">
+                    <X size={18} />
+                  </button>
+                </div>
+                <div className="share-intake-body">
+                  <label className="medical-request-link-field">
+                    <span>Secure client link</span>
+                    <input value={shareUrl} readOnly onFocus={(event) => event.target.select()} />
+                  </label>
+                  <div className="share-link-permissions">
+                    <div className="share-link-permissions-copy">
+                      <strong>Shared link controls</strong>
+                      <small>Client access on this link.</small>
+                    </div>
+                    <label className="share-permission-toggle">
+                      <input
+                        type="checkbox"
+                        checked={shareClient?.portal_templates_visible !== false}
+                        disabled={savingPortalSettings}
+                        onChange={(event) => updateClientPortalSettings({ portal_templates_visible: event.target.checked })}
+                      />
+                      <span>Show templates</span>
+                    </label>
+                    <label className="share-permission-toggle">
+                      <input
+                        type="checkbox"
+                        checked={shareClient?.portal_template_inputs_enabled !== false && shareClient?.portal_templates_visible !== false}
+                        disabled={savingPortalSettings || shareClient?.portal_templates_visible === false}
+                        onChange={(event) => updateClientPortalSettings({ portal_template_inputs_enabled: event.target.checked })}
+                      />
+                      <span>Allow inputs</span>
+                    </label>
+                  </div>
+                  <div className="share-template-list">
+                    <div className="share-template-list-header">
+                      <strong>Templates to share</strong>
+                      <span>{shareTemplateOptions.filter((form) => form.client_portal_visible !== false).length}/{shareTemplateOptions.length}</span>
+                    </div>
+                    {shareTemplateOptions.length === 0 ? (
+                      <p className="muted">No template forms attached to this claim yet.</p>
+                    ) : (
+                      shareTemplateOptions.map((form) => (
+                        <label className="share-template-option" key={form.id}>
+                          <input
+                            type="checkbox"
+                            checked={form.client_portal_visible !== false}
+                            disabled={savingPortalSettings || shareClient?.portal_templates_visible === false}
+                            onChange={(event) => updateSharedTemplate(form, event.target.checked)}
+                          />
+                          <span>{form.template?.name || form.document?.file_name || 'Attached template'}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                  <div className="share-intake-message">
+                    <strong>Message</strong>
+                    <p>{shareMessageText}</p>
+                  </div>
+                  <div className="share-intake-actions">
+                    <a className="share-channel-button whatsapp" href={shareWhatsAppUrl} target="_blank" rel="noreferrer">
+                      <MessageCircle size={16} />
+                      WhatsApp
+                    </a>
+                    <a className="share-channel-button email" href={shareEmailUrl}>
+                      <Mail size={16} />
+                      Email
+                    </a>
+                    <button className="share-channel-button copy" type="button" onClick={() => copyClientIntakeLink(shareCase)}>
+                      <Copy size={16} />
+                      {copiedClientId === shareCase.client_id ? 'Copied' : 'Copy link'}
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          )}
+          {intakeCase && (
             <div className="modal-backdrop" role="presentation">
 	              <section className="modal-panel document-intake-modal" role="dialog" aria-modal="true" aria-labelledby="document-intake-title">
 	                <div className="modal-header">

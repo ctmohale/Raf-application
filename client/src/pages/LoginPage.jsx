@@ -9,9 +9,11 @@ export default function LoginPage() {
   const { login, register, isAuthenticated } = useAuth();
   const [mode, setMode] = useState('login');
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('demo@example.com');
-  const [password, setPassword] = useState('password123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [rememberLogin, setRememberLogin] = useState(true);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
   if (isAuthenticated) return <Navigate to="/" replace />;
@@ -20,11 +22,17 @@ export default function LoginPage() {
     event.preventDefault();
     setLoading(true);
     setError('');
+    setMessage('');
     try {
       if (mode === 'login') {
-        await login(email, password);
+        await login(email, password, { remember: rememberLogin });
       } else {
-        await register(name, email, password);
+        const result = await register(name, email, password);
+        if (result.pendingApproval) {
+          setMessage(result.message || 'Account created. An administrator must approve your access before you can sign in.');
+          setMode('login');
+          setPassword('');
+        }
       }
     } catch (err) {
       setError(err.message);
@@ -49,21 +57,59 @@ export default function LoginPage() {
           <button className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>Register</button>
         </div>
 
-        <form className="form-stack" onSubmit={handleSubmit}>
+        <form className="form-stack" onSubmit={handleSubmit} autoComplete="on">
           {mode === 'register' && (
-            <label>
+            <label htmlFor="auth-name">
               Name
-              <input value={name} onChange={(event) => setName(event.target.value)} required />
+              <input
+                id="auth-name"
+                name="name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                autoComplete="name"
+                required
+              />
             </label>
           )}
-          <label>
+          <label htmlFor="auth-email">
             Email
-            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+            <input
+              id="auth-email"
+              name="email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              autoComplete={mode === 'login' ? 'username' : 'email'}
+              autoCapitalize="none"
+              spellCheck="false"
+              required
+            />
           </label>
-          <label>
+          <label htmlFor="auth-password">
             Password
-            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={8} />
+            <input
+              id="auth-password"
+              name="password"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              required
+              minLength={8}
+            />
           </label>
+          {mode === 'login' && (
+            <label className="checkbox-line">
+              <input
+                type="checkbox"
+                checked={rememberLogin}
+                onChange={(event) => setRememberLogin(event.target.checked)}
+                autoComplete="on"
+              />
+              Remember me
+            </label>
+          )}
+          <StatusMessage type="success">{message}</StatusMessage>
           <StatusMessage type="error">{error}</StatusMessage>
           <button className="primary-button" disabled={loading}>
             {loading ? <ButtonSpinner label="Working..." /> : mode === 'login' ? 'Login' : 'Create account'}

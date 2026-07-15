@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, BarChart3, BellRing, BriefcaseBusiness, FileCheck2, FolderOpen, Plus, UploadCloud, Users, X } from 'lucide-react';
+import { BellRing, BriefcaseBusiness, FileCheck2, Filter, FolderOpen, Plus, UploadCloud, Users, X } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
@@ -36,6 +36,7 @@ export default function FirmWorkspacePage() {
   const [workspace, setWorkspace] = useState(null);
   const [clientForm, setClientForm] = useState(emptyClient);
   const [clientModalOpen, setClientModalOpen] = useState(false);
+  const [pipelineFilter, setPipelineFilter] = useState('all');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
@@ -76,6 +77,29 @@ export default function FirmWorkspacePage() {
   }
 
   if (!workspace) return <PageLoader label="Loading firm workspace..." />;
+  const pipelineFilterOptions = [
+    { value: 'all', label: 'All matters' },
+    { value: 'waiting', label: 'Waiting docs' },
+    { value: 'ready', label: 'Ready' },
+    { value: 'claims', label: 'Claim-linked' },
+    { value: 'unlinked', label: 'No claim yet' },
+    { value: 'reminders', label: 'Reminders due' }
+  ];
+  const filteredPipelineClients = workspace.clients.filter((client) => {
+    const requested = Number(client.requested_documents || 0);
+    const pending = Number(client.pending_documents || 0);
+    const hasClaim = Number(client.case_count || 0) > 0;
+
+    if (pipelineFilter === 'waiting') return pending > 0;
+    if (pipelineFilter === 'ready') return requested > 0 && pending === 0;
+    if (pipelineFilter === 'claims') return hasClaim;
+    if (pipelineFilter === 'unlinked') return !hasClaim;
+    if (pipelineFilter === 'reminders') return Boolean(client.reminder_due);
+    return true;
+  });
+  const filteredPipelineClientIds = new Set(filteredPipelineClients.map((client) => String(client.id)));
+  const filteredPipelineCases = (workspace.cases || []).filter((caseRecord) => filteredPipelineClientIds.has(String(caseRecord.client_id)));
+  const filteredPipelineLabel = pipelineFilterOptions.find((option) => option.value === pipelineFilter)?.label || 'All matters';
   const totalClients = Number(workspace.stats.clients || 0);
   const totalClaims = Number(workspace.cases?.length || workspace.stats.openCases || 0);
   const openClaims = Number(workspace.stats.openCases || 0);
@@ -89,33 +113,60 @@ export default function FirmWorkspacePage() {
   const documentCompletionRate = requestedDocuments > 0 ? Math.round((uploadedDocuments / requestedDocuments) * 100) : 0;
   const claimCoverageRate = totalClients > 0 ? Math.round((clientsWithClaims / totalClients) * 100) : 0;
   const averageDocsPerClient = totalClients > 0 ? (requestedDocuments / totalClients).toFixed(1) : '0.0';
-  const graphMax = Math.max(totalClients, totalClaims, requestedDocuments, uploadedDocuments, pendingDocuments, 1);
-  const lineGraph = [
-    { label: 'Clients', value: totalClients },
-    { label: 'Claims', value: totalClaims },
-    { label: 'Requests', value: requestedDocuments },
-    { label: 'Received', value: uploadedDocuments },
-    { label: 'Outstanding', value: pendingDocuments }
+  const filteredTotalClients = filteredPipelineClients.length;
+  const filteredTotalClaims = filteredPipelineCases.length;
+  const filteredOpenClaims = filteredPipelineCases.filter((caseRecord) => caseRecord.status !== 'closed').length;
+  const filteredRequestedDocuments = filteredPipelineClients.reduce((sum, client) => sum + Number(client.requested_documents || 0), 0);
+  const filteredUploadedDocuments = filteredPipelineClients.reduce((sum, client) => sum + Number(client.uploaded_documents || 0), 0);
+  const filteredPendingDocuments = filteredPipelineClients.reduce((sum, client) => sum + Number(client.pending_documents || 0), 0);
+  const filteredClientsWithClaims = filteredPipelineClients.filter((client) => Number(client.case_count || 0) > 0).length;
+  const filteredRemindersDue = filteredPipelineClients.filter((client) => client.reminder_due).length;
+  const filteredDocumentCompletionRate = filteredRequestedDocuments > 0 ? Math.round((filteredUploadedDocuments / filteredRequestedDocuments) * 100) : 0;
+  const filteredClaimCoverageRate = filteredTotalClients > 0 ? Math.round((filteredClientsWithClaims / filteredTotalClients) * 100) : 0;
+  const filteredAverageDocsPerClient = filteredTotalClients > 0 ? (filteredRequestedDocuments / filteredTotalClients).toFixed(1) : '0.0';
+  const pipelineMax = Math.max(filteredTotalClients, filteredTotalClaims, filteredRequestedDocuments, filteredUploadedDocuments, filteredPendingDocuments, 1);
+  const pipelineRows = [
+    { label: 'Clients', shortLabel: 'Clients', value: filteredTotalClients, detail: `${filteredClientsWithClaims} linked` },
+    { label: 'Claims', shortLabel: 'Claims', value: filteredTotalClaims, detail: `${filteredOpenClaims} open` },
+    { label: 'Documents requested', shortLabel: 'Requested', value: filteredRequestedDocuments, detail: `${filteredAverageDocsPerClient}/client` },
+    { label: 'Documents received', shortLabel: 'Received', value: filteredUploadedDocuments, detail: `${filteredDocumentCompletionRate}% ready` },
+    { label: 'Outstanding', value: filteredPendingDocuments, detail: `${filteredRemindersDue} reminders due`, tone: 'warning' }
   ];
-  const lineChartWidth = 620;
-  const lineChartHeight = 210;
-  const lineChartPadding = { top: 26, right: 26, bottom: 34, left: 34 };
-  const lineChartInnerWidth = lineChartWidth - lineChartPadding.left - lineChartPadding.right;
-  const lineChartInnerHeight = lineChartHeight - lineChartPadding.top - lineChartPadding.bottom;
-  const lineChartMax = Math.max(5, Math.ceil(graphMax / 5) * 5);
-  const linePoints = lineGraph.map((item, index) => ({
-    ...item,
-    x: lineChartPadding.left + (index / (lineGraph.length - 1)) * lineChartInnerWidth,
-    y: lineChartPadding.top + (1 - item.value / lineChartMax) * lineChartInnerHeight
-  }));
-  const firmLinePath = linePoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
-  const firmLineFill = `${firmLinePath} L ${linePoints.at(-1).x} ${lineChartHeight - lineChartPadding.bottom} L ${linePoints[0].x} ${lineChartHeight - lineChartPadding.bottom} Z`;
-  const activityGraph = [
-    { label: 'Ready', value: clientsReady, detail: 'clients complete' },
-    { label: 'Waiting', value: clientsWaitingForDocs, detail: 'need documents' },
-    { label: 'Due', value: remindersDue, detail: 'reminders due' }
+  const pipelineChart = {
+    width: 640,
+    height: 230,
+    top: 30,
+    right: 34,
+    bottom: 34,
+    left: 40
+  };
+  const pipelineMidLabel = Math.ceil(pipelineMax / 2);
+  const pipelineInnerWidth = pipelineChart.width - pipelineChart.left - pipelineChart.right;
+  const pipelineInnerHeight = pipelineChart.height - pipelineChart.top - pipelineChart.bottom;
+  const pipelinePoints = pipelineRows.map((item, index) => {
+    const x = pipelineChart.left + (index / Math.max(pipelineRows.length - 1, 1)) * pipelineInnerWidth;
+    const y = pipelineChart.top + (1 - item.value / pipelineMax) * pipelineInnerHeight;
+    return { ...item, x, y };
+  });
+  const pipelineLine = pipelinePoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+  const pipelineCurve = pipelinePoints.map((point, index) => {
+    if (index === 0) return `M ${point.x} ${point.y}`;
+    const previous = pipelinePoints[index - 1];
+    const controlOffset = (point.x - previous.x) / 2;
+    return `C ${previous.x + controlOffset} ${previous.y}, ${point.x - controlOffset} ${point.y}, ${point.x} ${point.y}`;
+  }).join(' ');
+  const pipelineFill = `${pipelineCurve} L ${pipelinePoints.at(-1).x} ${pipelineChart.height - pipelineChart.bottom} L ${pipelinePoints[0].x} ${pipelineChart.height - pipelineChart.bottom} Z`;
+  const collectionPriorities = [
+    { label: 'Outstanding files', value: pendingDocuments, detail: `${clientsWaitingForDocs} client${clientsWaitingForDocs === 1 ? '' : 's'} waiting` },
+    { label: 'Follow-ups due', value: remindersDue, detail: `${workspace.stats.autoReminders || 0} auto-reminder${Number(workspace.stats.autoReminders || 0) === 1 ? '' : 's'} active` },
+    { label: 'Ready clients', value: clientsReady, detail: 'complete document sets' }
   ];
-  const activityGraphMax = Math.max(...activityGraph.map((item) => item.value), 1);
+  const collectionFilesLabel = requestedDocuments > 0
+    ? `${uploadedDocuments}/${requestedDocuments} files received`
+    : 'No files requested yet';
+  const collectionNote = pendingDocuments > 0
+    ? 'Chase outstanding files before RAF lodgement prep.'
+    : 'Document collection is clear for the current requests.';
 
   return (
     <section className="page-stack">
@@ -140,64 +191,91 @@ export default function FirmWorkspacePage() {
         <section className="panel firm-line-card">
           <div className="panel-header">
             <div>
-              <h3>Firm Performance</h3>
-              <p>Client-to-claim pipeline and document collection progress.</p>
+              <h3>Pipeline Snapshot</h3>
+              <p>{filteredPipelineLabel} client matters and document movement.</p>
             </div>
-            <BarChart3 size={18} />
+            <label className="table-filter pipeline-filter" aria-label="Filter pipeline snapshot">
+              <Filter size={16} />
+              <select value={pipelineFilter} onChange={(event) => setPipelineFilter(event.target.value)}>
+                {pipelineFilterOptions.map((option) => (
+                  <option value={option.value} key={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
           </div>
-          <div className="firm-line-chart" role="img" aria-label="Firm clients claims and document intake line graph">
-            <svg viewBox={`0 0 ${lineChartWidth} ${lineChartHeight}`} preserveAspectRatio="xMidYMid meet">
-              <defs>
-                <linearGradient id="firmLineFill" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0%" stopColor="#1593E7" stopOpacity="0.18" />
-                  <stop offset="100%" stopColor="#1593E7" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <path className="firm-line-grid" d={`M ${lineChartPadding.left} ${lineChartPadding.top} H ${lineChartWidth - lineChartPadding.right} M ${lineChartPadding.left} ${lineChartPadding.top + lineChartInnerHeight / 2} H ${lineChartWidth - lineChartPadding.right} M ${lineChartPadding.left} ${lineChartHeight - lineChartPadding.bottom} H ${lineChartWidth - lineChartPadding.right}`} />
-              <path className="firm-line-fill" d={firmLineFill} />
-              <path className="firm-line-path" d={firmLinePath} />
-              {linePoints.map((point) => (
-                <g className="firm-line-point" key={point.label}>
-                  <circle cx={point.x} cy={point.y} r="4" />
-                  <text x={point.x} y={point.y - 10}>{point.value}</text>
-                </g>
-              ))}
-              {linePoints.map((point) => (
-                <text className="firm-line-label" x={point.x} y={lineChartHeight - 8} key={point.label}>{point.label}</text>
-              ))}
-            </svg>
+          <div className="pipeline-filter-summary" aria-label="Pipeline filter summary">
+            <span><strong>{filteredTotalClients}</strong> clients</span>
+            <span><strong>{filteredTotalClaims}</strong> claims</span>
+            <span><strong>{filteredRequestedDocuments}</strong> requested</span>
+            <span><strong>{filteredPendingDocuments}</strong> outstanding</span>
+          </div>
+          <div className="chart-wrap firm-pipeline-chart" aria-label="Firm pipeline line chart">
+            <div className="chart-plot" role="img" aria-label={`Pipeline by stage, up to ${pipelineMax}`}>
+              <div className="chart-scale" aria-hidden="true">
+                <span>{pipelineMax}</span>
+                <span>{pipelineMidLabel}</span>
+                <span>0</span>
+              </div>
+              <div className="line-chart">
+                <svg viewBox={`0 0 ${pipelineChart.width} ${pipelineChart.height}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label="Firm pipeline line graph">
+                  <defs>
+                    <linearGradient id="firmPipelineGradient" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0%" stopColor="#1593E7" stopOpacity="0.22" />
+                      <stop offset="100%" stopColor="#1593E7" stopOpacity="0" />
+                    </linearGradient>
+                  </defs>
+                  <path className="chart-grid" d={`M ${pipelineChart.left} ${pipelineChart.top} H ${pipelineChart.width - pipelineChart.right} M ${pipelineChart.left} ${pipelineChart.top + pipelineInnerHeight / 2} H ${pipelineChart.width - pipelineChart.right} M ${pipelineChart.left} ${pipelineChart.height - pipelineChart.bottom} H ${pipelineChart.width - pipelineChart.right}`} />
+                  <path className="chart-fill firm-pipeline-fill" d={pipelineFill} />
+                  <path className="chart-line" d={pipelineCurve || pipelineLine} />
+                  {pipelinePoints.map((point) => (
+                    <g className="chart-point" key={point.label}>
+                      <circle cx={point.x} cy={point.y} r="5" />
+                      <text x={point.x} y={point.y - 13}>{point.value}</text>
+                    </g>
+                  ))}
+                  {pipelinePoints.map((point) => (
+                    <text className="chart-month-label" x={point.x} y={pipelineChart.height - 8} key={point.label}>{point.shortLabel || point.label}</text>
+                  ))}
+                </svg>
+              </div>
+            </div>
           </div>
           <div className="firm-line-summary">
-            <span><strong>{claimCoverageRate}%</strong> claim coverage</span>
-            <span><strong>{documentCompletionRate}%</strong> readiness</span>
-            <span><strong>{averageDocsPerClient}</strong> docs/client</span>
-            <span><strong>{pendingDocuments}</strong> outstanding</span>
+            <span><strong>{filteredClaimCoverageRate}%</strong> claim coverage</span>
+            <span><strong>{filteredDocumentCompletionRate}%</strong> readiness</span>
+            <span><strong>{filteredAverageDocsPerClient}</strong> docs/client</span>
+            <span><strong>{filteredPendingDocuments}</strong> outstanding</span>
           </div>
         </section>
 
-        <section className="panel firm-graph-card">
+        <section className="panel firm-graph-card firm-collection-card">
           <div className="panel-header">
             <div>
-              <h3>Attention Needed</h3>
-              <p>Clients ready, waiting for documents, and reminders due.</p>
+              <h3>Document Collection</h3>
+              <p>Readiness, follow-ups, and the next admin priority.</p>
             </div>
-            <AlertTriangle size={18} />
+            <BellRing size={18} />
           </div>
-          <div className="firm-mini-columns">
-            {activityGraph.map((item) => (
-              <div className="firm-mini-column" key={item.label}>
-                <div><i style={{ height: `${Math.max(8, (item.value / activityGraphMax) * 100)}%` }} /></div>
-                <strong>{item.value}</strong>
+          <div className="firm-collection-progress">
+            <div>
+              <strong>{documentCompletionRate}%</strong>
+              <span>document readiness</span>
+            </div>
+            <small>{collectionFilesLabel}</small>
+            <div className="firm-collection-meter" aria-hidden="true">
+              <i style={{ width: `${Math.min(100, Math.max(0, documentCompletionRate))}%` }} />
+            </div>
+          </div>
+          <div className="firm-collection-priority">
+            {collectionPriorities.map((item) => (
+              <div className="firm-collection-row" key={item.label}>
                 <span>{item.label}</span>
+                <strong>{item.value}</strong>
                 <small>{item.detail}</small>
               </div>
             ))}
           </div>
-          <div className="firm-attention-summary">
-            <span><strong>{uploadedDocuments}</strong> received</span>
-            <span><strong>{pendingDocuments}</strong> outstanding</span>
-            <span><strong>{workspace.stats.autoReminders || 0}</strong> auto-reminders</span>
-          </div>
+          <p className="firm-collection-note">{collectionNote}</p>
         </section>
       </div>
 

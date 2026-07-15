@@ -6,7 +6,21 @@ import { openFirmDatabase } from '../services/firmDatabases.js';
 
 export const billingRouter = express.Router();
 
-billingRouter.use(authenticate, requireAdmin);
+billingRouter.use(authenticate);
+
+function requireAdminOnly(req, res, next) {
+  return requireAdmin(req, res, next);
+}
+
+function canReadFirmBilling(req, firm) {
+  if (req.user?.role === 'admin') return true;
+  const access = db.prepare(`
+    SELECT id
+    FROM user_firm_access
+    WHERE user_id = ? AND firm_id = ?
+  `).get(req.user.id, firm.id);
+  return Boolean(access);
+}
 
 function getBillingRate() {
   const setting = db.prepare("SELECT value FROM app_settings WHERE key = 'billing_rate_per_application'").get();
@@ -81,6 +95,7 @@ function getFirmBillingRow(firm, defaultBillingRate) {
 billingRouter.get('/firm/:id', (req, res) => {
   const firm = db.prepare('SELECT * FROM firms WHERE id = ? OR slug = ?').get(req.params.id, req.params.id);
   if (!firm) return res.status(404).json({ error: 'Firm not found' });
+  if (!canReadFirmBilling(req, firm)) return res.status(403).json({ error: 'Access to this firm workspace is required' });
 
   const defaultBillingRate = getBillingRate();
   const row = getFirmBillingRow(firm, defaultBillingRate);
@@ -104,12 +119,12 @@ billingRouter.get('/firm/:id', (req, res) => {
   });
 });
 
-billingRouter.get('/', (_req, res) => {
+billingRouter.get('/', requireAdminOnly, (_req, res) => {
   const firms = db.prepare('SELECT * FROM firms ORDER BY name COLLATE NOCASE').all();
   res.json(buildBillingPayload(firms));
 });
 
-billingRouter.patch('/rate', (req, res) => {
+billingRouter.patch('/rate', requireAdminOnly, (req, res) => {
   const rate = Number(req.body?.rate_per_application);
   if (!Number.isFinite(rate) || rate <= 0) {
     return res.status(400).json({ error: 'Billing rate must be a positive number' });
@@ -120,7 +135,7 @@ billingRouter.patch('/rate', (req, res) => {
   return res.json(buildBillingPayload(firms));
 });
 
-billingRouter.patch('/firms/:id/rate', (req, res) => {
+billingRouter.patch('/firms/:id/rate', requireAdminOnly, (req, res) => {
   const rate = Number(req.body?.rate_per_application);
   if (!Number.isFinite(rate) || rate <= 0) {
     return res.status(400).json({ error: 'Firm billing rate must be a positive number' });
