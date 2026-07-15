@@ -104,6 +104,73 @@ function drawTextInBox(page, box, value, pageHeight, font, color = rgb(0.03, 0.0
   });
 }
 
+function fitGroupedTextToBox(value, box, font, fontSize, maxLines) {
+  let remaining = normalizeValue(value);
+  const lines = [];
+  const maxWidth = Math.max(20, Number(box.width || 0) - 6);
+
+  while (remaining && lines.length < maxLines) {
+    if (font.widthOfTextAtSize(remaining, fontSize) <= maxWidth) {
+      lines.push(remaining);
+      remaining = '';
+      break;
+    }
+
+    let low = 1;
+    let high = remaining.length;
+    let best = 1;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (font.widthOfTextAtSize(remaining.slice(0, mid), fontSize) <= maxWidth) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const candidate = remaining.slice(0, best + 1);
+    const wordBreak = Math.max(candidate.lastIndexOf(' '), candidate.lastIndexOf(','));
+    const splitAt = wordBreak > Math.floor(best * 0.45) ? wordBreak : best;
+    const line = remaining.slice(0, splitAt) || remaining.slice(0, best);
+    lines.push(line);
+    remaining = remaining.slice(line.length);
+  }
+
+  return { lines, remaining };
+}
+
+function drawFlowingTextInGroupedBoxes(page, boxes, value, pageHeight, font) {
+  let remaining = normalizeValue(value).replace(/\r?\n/g, ' ');
+  let boxIndex = 0;
+
+  while (remaining && boxIndex < boxes.length) {
+    const box = boxes[boxIndex];
+    const boxHeight = Math.max(12, Number(box.height || 20));
+    const fontSize = Math.max(7, Math.min(11, boxHeight * 0.42));
+    const lineHeight = fontSize * 1.18;
+    const maxLines = Math.max(1, Math.floor((boxHeight - 4) / lineHeight));
+    const fitted = fitGroupedTextToBox(remaining, box, font, fontSize, maxLines);
+
+    fitted.lines.forEach((line, index) => {
+      if (line === '') return;
+      const text = line.length > 180 ? `${line.slice(0, 179)}...` : line;
+      page.drawText(text, {
+        x: Number(box.x) + 3,
+        y: pageHeight - Number(box.y) - 4 - fontSize - (index * lineHeight),
+        size: fontSize,
+        font,
+        color: rgb(0.03, 0.09, 0.18),
+        maxWidth: Math.max(20, Number(box.width) - 6)
+      });
+    });
+
+    remaining = fitted.remaining;
+    boxIndex += 1;
+  }
+}
+
 function checkboxMarkStyle(field) {
   const option = Array.isArray(field?.options)
     ? field.options.find((item) => item && item.kind === 'checkbox-mark-style')
@@ -247,10 +314,7 @@ export async function generateFilledPdf({ template, fields, data, userId, source
     if (field.field_type === 'repeatable') {
       const childBoxes = groupedInputBoxes(field);
       if (childBoxes.length > 0) {
-        const lines = normalizeValue(value).split(/\r?\n/);
-        childBoxes.forEach((box, index) => {
-          drawTextInBox(page, box, lines[index] || '', pageHeight, font);
-        });
+        drawFlowingTextInGroupedBoxes(page, childBoxes, value, pageHeight, font);
         continue;
       }
 

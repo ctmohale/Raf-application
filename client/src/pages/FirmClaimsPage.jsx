@@ -36,6 +36,76 @@ function getGroupedFieldBoxes(field) {
   return Array.isArray(groupConfig?.boxes) ? groupConfig.boxes : [];
 }
 
+function normalizeGroupedText(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item ?? '')).join('\n');
+  return String(value ?? '');
+}
+
+let groupedMeasureContext = null;
+
+function measureGroupedTextWidth(value) {
+  if (typeof document === 'undefined') return String(value || '').length * 6;
+  if (!groupedMeasureContext) {
+    groupedMeasureContext = document.createElement('canvas').getContext('2d');
+  }
+  groupedMeasureContext.font = '760 12px Inter, system-ui, sans-serif';
+  return groupedMeasureContext.measureText(String(value || '')).width;
+}
+
+function getGroupedBoxLineLimit(box) {
+  const boxWidth = Math.max(30, Number(box?.width || 160));
+  return Math.max(22, boxWidth - 6);
+}
+
+function splitTextForGroupedBox(value, box) {
+  const text = String(value ?? '');
+  const lineLimit = getGroupedBoxLineLimit(box);
+  if (measureGroupedTextWidth(text) <= lineLimit) return { line: text, remaining: '' };
+
+  let low = 1;
+  let high = text.length;
+  let best = 1;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (measureGroupedTextWidth(text.slice(0, mid)) <= lineLimit) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const chunk = text.slice(0, best + 1);
+  const breakAt = Math.max(chunk.lastIndexOf(' '), chunk.lastIndexOf(','));
+  const splitAt = breakAt > Math.floor(best * 0.45) ? breakAt : best;
+
+  return {
+    line: text.slice(0, splitAt),
+    remaining: text.slice(splitAt)
+  };
+}
+
+function distributeGroupedText(value, boxes, count) {
+  const safeCount = Math.max(0, Number(count || 0));
+  const sourceLines = normalizeGroupedText(value).split(/\r?\n/);
+  if (sourceLines.length >= safeCount) return sourceLines.slice(0, safeCount);
+
+  const lines = Array.from({ length: safeCount }, () => '');
+  let slotIndex = 0;
+  let remaining = sourceLines.join(' ');
+
+  while (remaining && slotIndex < safeCount) {
+    const box = boxes[slotIndex] || boxes[0] || {};
+    const result = splitTextForGroupedBox(remaining, box);
+    lines[slotIndex] = result.line;
+    remaining = result.remaining;
+    slotIndex += 1;
+  }
+
+  return lines;
+}
+
 function normalizeSectionText(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9&]+/g, ' ').trim();
 }
@@ -1195,11 +1265,10 @@ export default function FirmClaimsPage() {
         return;
       }
 
-      const repeatValue = Array.isArray(values[valueKey]) ? values[valueKey].join('\n') : String(values[valueKey] || '');
+      const repeatValue = normalizeGroupedText(values[valueKey]);
       const groupedBoxes = getGroupedFieldBoxes(field);
       const inputCount = groupedBoxes.length || groupedInputCount(field, repeatValue);
-      const lines = repeatValue.split(/\r?\n/);
-      while (lines.length < inputCount) lines.push('');
+      const lines = distributeGroupedText(repeatValue, groupedBoxes, inputCount);
 
       lines.slice(0, inputCount).forEach((line, index) => {
         const box = groupedBoxes[index];
@@ -1209,7 +1278,8 @@ export default function FirmClaimsPage() {
           ...field,
           id: `${field.id}-preview-${index}`,
           name: previewName,
-          label: `${readableLabel} ${index + 1}`,
+          label: index === 0 ? readableLabel : '',
+          aria_label: `${readableLabel} ${index + 1}`,
           page_number: Number(box?.page_number || field.page_number),
           x: Number(box?.x ?? field.x),
           y: Number(box?.y ?? field.y),
@@ -1220,7 +1290,8 @@ export default function FirmClaimsPage() {
           default_value: '',
           source_value_key: valueKey,
           source_line_index: index,
-          source_line_count: inputCount
+          source_line_count: inputCount,
+          source_grouped_boxes: groupedBoxes
         });
       });
     });
@@ -1334,11 +1405,16 @@ export default function FirmClaimsPage() {
     return Math.max(filledLines, Math.max(2, Math.min(12, heightCount)));
   }
 
-  function updateGroupedInputLine(valueKey, currentValue, index, nextValue, count) {
-    const lines = String(Array.isArray(currentValue) ? currentValue.join('\n') : currentValue || '').split(/\r?\n/);
-    while (lines.length < count) lines.push('');
-    lines[index] = nextValue;
-    updateEditFormValue(valueKey, lines.join('\n'));
+  function updateGroupedInputLine(valueKey, currentValue, index, nextValue, count, boxes = []) {
+    const existingLines = distributeGroupedText(currentValue, boxes, count);
+    const prefix = existingLines.slice(0, index);
+    const suffix = existingLines.slice(index + 1).filter((line) => line !== '');
+    const flowingText = [nextValue, ...suffix].join(' ');
+    const nextLines = [
+      ...prefix,
+      ...distributeGroupedText(flowingText, boxes.slice(index), count - index)
+    ].slice(0, count);
+    updateEditFormValue(valueKey, nextLines.join('\n'));
   }
 
   function updateDocumentFieldValue(field, nextValue) {
@@ -1350,7 +1426,13 @@ export default function FirmClaimsPage() {
     if (Number.isInteger(field.source_line_index)) {
       const currentValue = editFormValues[valueKey];
       const count = Math.max(Number(field.source_line_count || 0), field.source_line_index + 1);
-      updateGroupedInputLine(valueKey, currentValue, field.source_line_index, nextValue, count);
+      const renderScale = Math.max(0.2, Number(field.source_render_scale || 1));
+      const groupedBoxes = (field.source_grouped_boxes || []).map((box) => ({
+        ...box,
+        width: Number(box.width || field.width || 0) * renderScale,
+        height: Number(box.height || field.height || 0) * renderScale
+      }));
+      updateGroupedInputLine(valueKey, currentValue, field.source_line_index, nextValue, count, groupedBoxes);
       return;
     }
     updateEditFormValue(valueKey, nextValue);
@@ -1408,11 +1490,11 @@ export default function FirmClaimsPage() {
     }
 
     if (field.field_type === 'repeatable') {
-      const repeatValue = Array.isArray(value) ? value.join('\n') : String(value || '');
+      const repeatValue = normalizeGroupedText(value);
       const readableLabel = getReadableFieldLabel(field, editFormFields);
+      const groupedBoxes = getGroupedFieldBoxes(field);
       const inputCount = groupedInputCount(field, repeatValue);
-      const lines = repeatValue.split(/\r?\n/);
-      while (lines.length < inputCount) lines.push('');
+      const lines = distributeGroupedText(repeatValue, groupedBoxes, inputCount);
 
       return (
         <div className="grouped-input-fields" role="group" aria-label={readableLabel}>
@@ -1421,12 +1503,13 @@ export default function FirmClaimsPage() {
             const lineId = `${inputId}-${index}`;
             return (
               <label className="grouped-input-line" htmlFor={lineId} key={lineId}>
-                <span>{readableLabel} {index + 1}</span>
+                {index === 0 ? <span>{readableLabel}</span> : null}
                 <input
                   id={lineId}
                   type="text"
+                  aria-label={`${readableLabel} ${index + 1}`}
                   value={line}
-                  onChange={(event) => updateGroupedInputLine(valueKey, repeatValue, index, event.target.value, inputCount)}
+                  onChange={(event) => updateGroupedInputLine(valueKey, repeatValue, index, event.target.value, inputCount, groupedBoxes)}
                   required={field.required && index === 0}
                 />
               </label>

@@ -504,6 +504,7 @@ function PdfPage({
           const entryValue = entryValueForField(field, values);
           const previewValue = formatPreviewValue(rawValue);
           const hasValue = previewValue.length > 0;
+          const fieldLabel = field.aria_label || field.label;
           const displayText = readOnly ? (previewValue || field.label) : field.label;
           const signatureClass = (readOnly || entryMode) && isSignatureField(field) ? 'signature-field' : '';
           const signatureImage = readOnly && isSignatureField(field) && isDataImageValue(rawValue);
@@ -541,7 +542,7 @@ function PdfPage({
                 key={field.id}
                 className={fieldClasses}
                 style={fieldStyle}
-                title={field.label}
+                title={fieldLabel}
               >
                 {field.field_type === 'checkbox' ? (
                   <input
@@ -581,8 +582,11 @@ function PdfPage({
                     {...inputProps}
                     value={entryValue || ''}
                     disabled={locked}
-                    onChange={(event) => onEntryValueChange?.(field, event.target.value)}
-                    aria-label={field.label}
+                    onChange={(event) => onEntryValueChange?.({
+                      ...field,
+                      source_render_scale: Number(field.width) ? event.currentTarget.clientWidth / Number(field.width) : 1
+                    }, event.target.value)}
+                    aria-label={fieldLabel}
                     placeholder={field.label}
                   />
                 )}
