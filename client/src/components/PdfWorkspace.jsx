@@ -128,6 +128,14 @@ function isLikelyLabelTile(item) {
   return /:$|name|surname|date|e-?mail|email|phone|telephone|cell|address|signature|amount|total|\bid\b|number|claim|contact|practice|description|injury|diagnosis|symptoms|complaints|treatment|signed/i.test(text);
 }
 
+function isLikelySectionTitle(item) {
+  const text = String(item?.text || '').replace(/[:\s]+$/g, '').trim();
+  if (!text) return false;
+  if (knownSectionLabels.some((label) => normalizeTileKey(label) === normalizeTileKey(text))) return true;
+  const letters = text.replace(/[^a-z]/gi, '');
+  return letters.length >= 4 && text === text.toUpperCase() && text.length <= 90;
+}
+
 function newField(pageNumber, x, y, count, patch = {}) {
   const label = patch.label || `Field ${count + 1}`;
   return {
@@ -258,6 +266,7 @@ function PdfPage({
   onSelectField,
   multiSelectedFieldIds = [],
   onToggleMultiSelect,
+  onPickSectionTitle,
   mode,
   textTileMode,
   entryMode,
@@ -281,7 +290,7 @@ function PdfPage({
     const baseScale = clamp(availableWidth / effectiveWidth, minScale, 1.35);
     return clamp(baseScale * zoom, minScale * 0.75, 2.4);
   }, [containerWidth, effectiveWidth, fitPadding, minScale, zoom]);
-  const textPickMode = !entryMode && !readOnly && (mode === 'select' || mode === 'text');
+  const textPickMode = !entryMode && !readOnly && ['select', 'text', 'section'].includes(mode);
 
   useEffect(() => {
     let cancelled = false;
@@ -313,13 +322,13 @@ function PdfPage({
           .map((item) => textItemBounds(page, item))
           .flatMap((item) => splitKnownLabels(item))
           .filter((item) => item.text.length > 1)
-          .filter((item) => textTileMode === 'all' || isLikelyLabelTile(item))
+          .filter((item) => textTileMode === 'all' || mode === 'section' || isLikelyLabelTile(item))
       );
     });
     return () => {
       cancelled = true;
     };
-  }, [page, textTileMode]);
+  }, [mode, page, textTileMode]);
 
   function handleAdd(event) {
     if (readOnly || !['add', 'checkbox'].includes(mode)) return;
@@ -346,6 +355,19 @@ function PdfPage({
     event.stopPropagation();
     const textKey = `${pageNumber}-${item.text}-${Math.round(item.x)}-${Math.round(item.y)}`;
     setSelectedTextKey(textKey);
+
+    if (mode === 'section') {
+      const nextSection = textItems
+        .filter((candidate) => candidate.y > item.y + 3 && isLikelySectionTitle(candidate))
+        .sort((a, b) => a.y - b.y)[0];
+      onPickSectionTitle?.({
+        title: item.text.replace(/[:_*]+$/g, '').replace(/\s+/g, ' ').trim(),
+        page_number: pageNumber,
+        y: item.y,
+        next_section_y: nextSection?.y ?? null
+      });
+      return;
+    }
 
     const gap = 12;
     const desiredWidth = 190;
@@ -490,7 +512,7 @@ function PdfPage({
                     height: Math.max(item.height * scale, 12)
                   }}
                   onClick={(event) => handleTextField(event, item)}
-                  title={`Create field from "${item.text}"`}
+                  title={mode === 'section' ? `Use "${item.text}" as a section title` : `Create field from "${item.text}"`}
                 >
                   {item.text}
                 </button>
@@ -613,7 +635,9 @@ function PdfPage({
                 }
                 onSelectField(field.id);
               }}
-              title={hasValue ? `${field.label}: ${previewValue}` : `${groupedField ? 'Grouped input: ' : ''}${field.label}. Shift-click to select for grouping.`}
+              title={sectionMarked
+                ? `${field.label} · Section: ${field.section_title}`
+                : (hasValue ? `${field.label}: ${previewValue}` : `${groupedField ? 'Grouped input: ' : ''}${field.label}. Shift-click to select for grouping.`)}
             >
               {signatureImage ? (
                 <img src={rawValue} alt={field.label} />
@@ -650,6 +674,11 @@ function PdfPage({
             <Plus size={15} /> Click text to create field
           </div>
         )}
+        {mode === 'section' && !readOnly && (
+          <div className="add-cursor section-title-cursor">
+            Click a heading to make a section
+          </div>
+        )}
       </div>
     </div>
   );
@@ -664,6 +693,7 @@ export default function PdfWorkspace({
   onSelectField,
   multiSelectedFieldIds = [],
   onToggleMultiSelect,
+  onPickSectionTitle,
   mode = 'select',
   textTileMode = 'labels',
   entryMode = false,
@@ -723,6 +753,7 @@ export default function PdfWorkspace({
           onSelectField={onSelectField}
           multiSelectedFieldIds={multiSelectedFieldIds}
           onToggleMultiSelect={onToggleMultiSelect}
+          onPickSectionTitle={onPickSectionTitle}
           mode={mode}
           textTileMode={textTileMode}
           entryMode={entryMode}

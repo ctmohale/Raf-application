@@ -3,6 +3,17 @@ import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { clientUploadsDir, firmsDir } from '../config.js';
 
+export const coreClientDocumentRequests = Object.freeze([
+  ['claimant_id', 'ID / Passport', 'Certified identity document.'],
+  ['police_accident_report', 'Police Report', 'Police accident records.'],
+  ['client_accident_affidavit', 'Accident Affidavit', 'Signed accident statement.'],
+  ['medical_documents', 'Medical Records', 'Treatment and medical records.'],
+  ['medical_expenses', 'Medical Bills', 'Invoices and payment proof.'],
+  ['employment_income', 'Employment & Income', 'Income and work records.'],
+  ['banking_proof', 'Banking Proof', 'Bank letter or statement.'],
+  ['photographs', 'Photos', 'Injury and accident photos.']
+]);
+
 export function slugifyFirmName(name) {
   const slug = String(name)
     .trim()
@@ -157,6 +168,7 @@ export function initializeFirmDatabase(firm) {
         case_id INTEGER NOT NULL,
         document_type TEXT NOT NULL,
         label TEXT NOT NULL,
+        instructions TEXT,
         status TEXT NOT NULL DEFAULT 'requested',
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -172,6 +184,12 @@ export function initializeFirmDatabase(firm) {
         stored_filename TEXT NOT NULL,
         mime_type TEXT,
         file_size INTEGER,
+        ai_status TEXT NOT NULL DEFAULT 'pending',
+        ai_model TEXT,
+        ai_extracted_json TEXT,
+        ai_summary TEXT,
+        ai_error TEXT,
+        ai_processed_at TEXT,
         uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (request_id) REFERENCES client_document_requests(id) ON DELETE CASCADE,
         FOREIGN KEY (client_id) REFERENCES firm_clients(id) ON DELETE CASCADE
@@ -232,6 +250,25 @@ export function initializeFirmDatabase(firm) {
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS matter_assignment_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER NOT NULL,
+        previous_lawyer_user_id INTEGER,
+        previous_assistant_user_id INTEGER,
+        responsible_lawyer_user_id INTEGER,
+        assigned_assistant_user_id INTEGER,
+        assigned_by_user_id INTEGER NOT NULL,
+        assignment_note TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (case_id) REFERENCES raf_cases(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS firm_schema_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE INDEX IF NOT EXISTS idx_templates_user ON document_templates(user_id);
       CREATE INDEX IF NOT EXISTS idx_fields_template ON template_fields(template_id);
       CREATE INDEX IF NOT EXISTS idx_docs_user ON generated_documents(user_id);
@@ -247,6 +284,7 @@ export function initializeFirmDatabase(firm) {
       CREATE INDEX IF NOT EXISTS idx_medical_assessments_case ON medical_assessment_requests(case_id);
       CREATE INDEX IF NOT EXISTS idx_medical_assessments_token ON medical_assessment_requests(secure_token);
       CREATE INDEX IF NOT EXISTS idx_firm_doctors_status ON firm_doctors(status);
+      CREATE INDEX IF NOT EXISTS idx_matter_assignment_history_case ON matter_assignment_history(case_id, created_at);
     `);
 
     const clientColumns = firmDb.prepare('PRAGMA table_info(firm_clients)').all().map((column) => column.name);
@@ -304,6 +342,25 @@ export function initializeFirmDatabase(firm) {
     addCaseColumn('deadline_status', "TEXT NOT NULL DEFAULT 'attorney_review_required'");
     addCaseColumn('lawyer_review_status', "TEXT NOT NULL DEFAULT 'not_reviewed'");
     addCaseColumn('original_tracking_json', 'TEXT');
+    addCaseColumn('responsible_lawyer_user_id', 'INTEGER');
+    addCaseColumn('assigned_assistant_user_id', 'INTEGER');
+    addCaseColumn('ai_structured_json', 'TEXT');
+    addCaseColumn('ai_summary', 'TEXT');
+    addCaseColumn('ai_updated_at', 'TEXT');
+
+    const uploadColumns = firmDb.prepare('PRAGMA table_info(client_uploads)').all().map((column) => column.name);
+    const addUploadColumn = (name, definition) => {
+      if (!uploadColumns.includes(name)) {
+        firmDb.prepare(`ALTER TABLE client_uploads ADD COLUMN ${name} ${definition}`).run();
+      }
+    };
+
+    addUploadColumn('ai_status', "TEXT NOT NULL DEFAULT 'pending'");
+    addUploadColumn('ai_model', 'TEXT');
+    addUploadColumn('ai_extracted_json', 'TEXT');
+    addUploadColumn('ai_summary', 'TEXT');
+    addUploadColumn('ai_error', 'TEXT');
+    addUploadColumn('ai_processed_at', 'TEXT');
 
     const medicalAssessmentColumns = firmDb.prepare('PRAGMA table_info(medical_assessment_requests)').all().map((column) => column.name);
     const addMedicalAssessmentColumn = (name, definition) => {
@@ -317,6 +374,120 @@ export function initializeFirmDatabase(firm) {
     addMedicalAssessmentColumn('inherit_client_information', 'INTEGER NOT NULL DEFAULT 1');
     addMedicalAssessmentColumn('lock_prefilled_fields', 'INTEGER NOT NULL DEFAULT 1');
     addMedicalAssessmentColumn('hide_prefilled_fields', 'INTEGER NOT NULL DEFAULT 0');
+
+    const documentRequestColumns = firmDb.prepare('PRAGMA table_info(client_document_requests)').all().map((column) => column.name);
+    if (!documentRequestColumns.includes('instructions')) {
+      firmDb.prepare('ALTER TABLE client_document_requests ADD COLUMN instructions TEXT').run();
+    }
+
+    const coreDocumentRequestMigration = 'limit-client-document-requests-to-four-v1';
+    const coreDocumentRequestMigrationApplied = firmDb.prepare(
+      'SELECT 1 FROM firm_schema_migrations WHERE name = ?'
+    ).get(coreDocumentRequestMigration);
+
+    if (!coreDocumentRequestMigrationApplied) {
+      const coreDocumentTypes = coreClientDocumentRequests.map(([type]) => type);
+      const placeholders = coreDocumentTypes.map(() => '?').join(', ');
+      const migrateDocumentRequests = firmDb.transaction(() => {
+        firmDb.prepare(`
+          DELETE FROM client_document_requests
+          WHERE document_type NOT IN (${placeholders})
+            AND NOT EXISTS (
+              SELECT 1 FROM client_uploads
+              WHERE client_uploads.request_id = client_document_requests.id
+            )
+        `).run(...coreDocumentTypes);
+        firmDb.prepare('INSERT INTO firm_schema_migrations (name) VALUES (?)')
+          .run(coreDocumentRequestMigration);
+      });
+      migrateDocumentRequests();
+    }
+
+    const essentialDocumentMigration = 'expand-essential-client-documents-v2';
+    const essentialDocumentMigrationApplied = firmDb.prepare(
+      'SELECT 1 FROM firm_schema_migrations WHERE name = ?'
+    ).get(essentialDocumentMigration);
+
+    if (!essentialDocumentMigrationApplied) {
+      const essentialDocumentTypes = coreClientDocumentRequests.map(([type]) => type);
+      const placeholders = essentialDocumentTypes.map(() => '?').join(', ');
+      const migrateEssentialDocuments = firmDb.transaction(() => {
+        firmDb.prepare(`
+          DELETE FROM client_document_requests
+          WHERE document_type NOT IN (${placeholders})
+            AND NOT EXISTS (
+              SELECT 1 FROM client_uploads
+              WHERE client_uploads.request_id = client_document_requests.id
+            )
+        `).run(...essentialDocumentTypes);
+
+        const cases = firmDb.prepare('SELECT id, client_id FROM raf_cases').all();
+        const findRequest = firmDb.prepare(
+          'SELECT id FROM client_document_requests WHERE case_id = ? AND document_type = ? ORDER BY id LIMIT 1'
+        );
+        const updateRequest = firmDb.prepare(
+          'UPDATE client_document_requests SET label = ?, instructions = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+        );
+        const insertRequest = firmDb.prepare(`
+          INSERT INTO client_document_requests (client_id, case_id, document_type, label, instructions)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+
+        for (const caseRecord of cases) {
+          for (const [type, label, instructions] of coreClientDocumentRequests) {
+            const existing = findRequest.get(caseRecord.id, type);
+            if (existing) updateRequest.run(label, instructions, existing.id);
+            else insertRequest.run(caseRecord.client_id, caseRecord.id, type, label, instructions);
+          }
+        }
+
+        firmDb.prepare('INSERT INTO firm_schema_migrations (name) VALUES (?)')
+          .run(essentialDocumentMigration);
+      });
+      migrateEssentialDocuments();
+    }
+
+    const compactDocumentLabelsMigration = 'compact-document-labels-v3';
+    const compactDocumentLabelsApplied = firmDb.prepare(
+      'SELECT 1 FROM firm_schema_migrations WHERE name = ?'
+    ).get(compactDocumentLabelsMigration);
+
+    if (!compactDocumentLabelsApplied) {
+      const updateDocumentRequest = firmDb.prepare(`
+        UPDATE client_document_requests
+        SET label = ?, instructions = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE document_type = ?
+      `);
+      const migrateCompactLabels = firmDb.transaction(() => {
+        for (const [type, label, instructions] of coreClientDocumentRequests) {
+          updateDocumentRequest.run(label, instructions, type);
+        }
+        firmDb.prepare('INSERT INTO firm_schema_migrations (name) VALUES (?)')
+          .run(compactDocumentLabelsMigration);
+      });
+      migrateCompactLabels();
+    }
+
+    const shortDocumentGuidanceMigration = 'short-document-guidance-v4';
+    const shortDocumentGuidanceApplied = firmDb.prepare(
+      'SELECT 1 FROM firm_schema_migrations WHERE name = ?'
+    ).get(shortDocumentGuidanceMigration);
+
+    if (!shortDocumentGuidanceApplied) {
+      const updateDocumentRequest = firmDb.prepare(`
+        UPDATE client_document_requests
+        SET label = ?, instructions = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE document_type = ?
+      `);
+      const migrateShortGuidance = firmDb.transaction(() => {
+        for (const [type, label, instructions] of coreClientDocumentRequests) {
+          updateDocumentRequest.run(label, instructions, type);
+        }
+        firmDb.prepare('INSERT INTO firm_schema_migrations (name) VALUES (?)')
+          .run(shortDocumentGuidanceMigration);
+      });
+      migrateShortGuidance();
+    }
 
     firmDb.exec(`
       CREATE INDEX IF NOT EXISTS idx_clients_next_reminder ON firm_clients(next_reminder_at);

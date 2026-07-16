@@ -1,12 +1,14 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
+import bcrypt from 'bcryptjs';
 import { db, serializeDocument, serializeField, serializeTemplate } from '../db/db.js';
 import { clientUploadsDir, config, resolveInside } from '../config.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
 import { clientDocumentUpload } from '../middleware/upload.js';
 import { generateFilledPdf, validateDataAgainstFields } from '../services/pdfFill.js';
-import { getFirmDatabasePath, initializeFirmDatabase, openFirmDatabase, slugifyFirmName } from '../services/firmDatabases.js';
+import { processUploadedDocumentWithAi, reviewMissingTemplateFieldsWithAi } from '../services/aiDocumentExtraction.js';
+import { coreClientDocumentRequests, getFirmDatabasePath, initializeFirmDatabase, openFirmDatabase, slugifyFirmName } from '../services/firmDatabases.js';
 import { sendPowerMail } from '../services/powerMail.js';
 import { getTemplateFields } from '../services/templateAccess.js';
 
@@ -18,6 +20,76 @@ const medicalReportTypes = new Map([
   ['supporting_medical_report', 'General supporting medical report'],
   ['specialist_report', 'Additional specialist report']
 ]);
+const firmTeamRoles = new Set(['firm_admin', 'lawyer', 'assistant']);
+const teamAccountStatuses = new Set(['pending', 'active', 'suspended']);
+
+function getFirmTeamMembers(firmId, firmDb = null) {
+  const members = db.prepare(`
+    SELECT
+      users.id,
+      users.name,
+      users.email,
+      users.status,
+      users.created_at,
+      users.updated_at,
+      user_firm_access.access_level,
+      user_firm_access.firm_role,
+      user_firm_access.phone,
+      user_firm_access.job_title,
+      user_firm_access.can_submit_claims
+    FROM user_firm_access
+    JOIN users ON users.id = user_firm_access.user_id
+    WHERE user_firm_access.firm_id = ?
+    ORDER BY
+      CASE user_firm_access.firm_role
+        WHEN 'firm_admin' THEN 0
+        WHEN 'lawyer' THEN 1
+        ELSE 2
+      END,
+      users.name COLLATE NOCASE
+  `).all(firmId);
+
+  return members.map((member) => ({
+    ...member,
+    can_submit_claims: Boolean(member.can_submit_claims),
+    assigned_matter_count: firmDb
+      ? Number(firmDb.prepare(`
+          SELECT COUNT(*) AS count
+          FROM raf_cases
+          WHERE responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?
+        `).get(member.id, member.id).count || 0)
+      : 0
+  }));
+}
+
+function canManageFirmTeam(req) {
+  return req.user?.role === 'admin' || req.firmAccess?.firm_role === 'firm_admin';
+}
+
+function getFirmMember(firmId, userId) {
+  return db.prepare(`
+    SELECT users.*, user_firm_access.firm_role, user_firm_access.access_level,
+      user_firm_access.phone, user_firm_access.job_title, user_firm_access.can_submit_claims
+    FROM user_firm_access
+    JOIN users ON users.id = user_firm_access.user_id
+    WHERE user_firm_access.firm_id = ? AND users.id = ?
+  `).get(firmId, userId);
+}
+
+function addAssignmentNotification({ userId, firmId, caseId, message }) {
+  if (!userId) return;
+  db.prepare(`
+    INSERT INTO firm_user_notifications (user_id, firm_id, case_id, notification_type, message)
+    VALUES (?, ?, ?, 'matter_assignment', ?)
+  `).run(userId, firmId, caseId, message);
+}
+
+const clientUploadDocumentCondition = `
+  NOT (
+    LOWER(TRIM(COALESCE(client_document_requests.document_type, ''))) = 'medical_report'
+    OR LOWER(TRIM(COALESCE(client_document_requests.label, ''))) = 'medical report'
+  )
+`;
 
 function serializeFirm(row) {
   return {
@@ -87,6 +159,15 @@ function mergeData(target, values) {
   }
 }
 
+function mergeMissingData(target, values) {
+  for (const [key, value] of Object.entries(values || {})) {
+    if (!hasManualValue(value)) continue;
+    const normalizedKey = normalizeDataKey(key);
+    if (!hasManualValue(target[key])) target[key] = value;
+    if (!hasManualValue(target[normalizedKey])) target[normalizedKey] = value;
+  }
+}
+
 function addYearsMinusOneDay(dateText, years) {
   const date = new Date(`${dateText}T00:00:00Z`);
   if (Number.isNaN(date.getTime())) return null;
@@ -149,7 +230,13 @@ function hasPendingDocuments(firmDb, clientId) {
   const row = firmDb.prepare(`
     SELECT COUNT(*) AS count
     FROM client_document_requests
-    WHERE client_id = ? AND status != 'uploaded'
+    WHERE client_id = ?
+      AND ${clientUploadDocumentCondition}
+      AND status != 'uploaded'
+      AND NOT EXISTS (
+        SELECT 1 FROM client_uploads
+        WHERE client_uploads.request_id = client_document_requests.id
+      )
   `).get(clientId);
   return Number(row.count || 0) > 0;
 }
@@ -228,15 +315,38 @@ function getWorkspacePayload(firm, req) {
     const clients = firmDb.prepare(`
       SELECT
         firm_clients.*,
-        COUNT(DISTINCT raf_cases.id) AS case_count,
-        COUNT(DISTINCT client_document_requests.id) AS requested_documents,
-        COUNT(DISTINCT client_uploads.id) AS uploaded_documents,
-        COUNT(DISTINCT CASE WHEN client_document_requests.status != 'uploaded' THEN client_document_requests.id END) AS pending_documents
+        (
+          SELECT COUNT(*) FROM raf_cases
+          WHERE raf_cases.client_id = firm_clients.id
+        ) AS case_count,
+        (
+          SELECT COUNT(*) FROM client_document_requests
+          WHERE client_document_requests.client_id = firm_clients.id
+            AND ${clientUploadDocumentCondition}
+        ) AS requested_documents,
+        (
+          SELECT COUNT(*) FROM client_document_requests
+          WHERE client_document_requests.client_id = firm_clients.id
+            AND ${clientUploadDocumentCondition}
+            AND (
+              client_document_requests.status = 'uploaded'
+              OR EXISTS (
+                SELECT 1 FROM client_uploads
+                WHERE client_uploads.request_id = client_document_requests.id
+              )
+            )
+        ) AS uploaded_documents,
+        (
+          SELECT COUNT(*) FROM client_document_requests
+          WHERE client_document_requests.client_id = firm_clients.id
+            AND ${clientUploadDocumentCondition}
+            AND client_document_requests.status != 'uploaded'
+            AND NOT EXISTS (
+              SELECT 1 FROM client_uploads
+              WHERE client_uploads.request_id = client_document_requests.id
+            )
+        ) AS pending_documents
       FROM firm_clients
-      LEFT JOIN raf_cases ON raf_cases.client_id = firm_clients.id
-      LEFT JOIN client_document_requests ON client_document_requests.client_id = firm_clients.id
-      LEFT JOIN client_uploads ON client_uploads.client_id = firm_clients.id
-      GROUP BY firm_clients.id
       ORDER BY firm_clients.created_at DESC
     `).all().map((client) => {
       const reminderDue = Boolean(
@@ -262,6 +372,13 @@ function getWorkspacePayload(firm, req) {
       ORDER BY raf_cases.opened_at DESC
       LIMIT 25
     `).all();
+    const teamMembers = getFirmTeamMembers(firm.id, firmDb);
+    const teamById = new Map(teamMembers.map((member) => [Number(member.id), member]));
+    const enrichedCases = cases.map((caseRecord) => ({
+      ...caseRecord,
+      responsible_lawyer: teamById.get(Number(caseRecord.responsible_lawyer_user_id)) || null,
+      assigned_assistant: teamById.get(Number(caseRecord.assigned_assistant_user_id)) || null
+    }));
 
     const documentRequests = firmDb.prepare(`
       SELECT
@@ -271,13 +388,45 @@ function getWorkspacePayload(firm, req) {
         COUNT(client_uploads.id) AS upload_count,
         MAX(client_uploads.id) AS latest_upload_id,
         MAX(client_uploads.original_filename) AS latest_upload_filename,
-        MAX(client_uploads.uploaded_at) AS latest_uploaded_at
+        MAX(client_uploads.uploaded_at) AS latest_uploaded_at,
+        (
+          SELECT latest_upload.ai_status FROM client_uploads AS latest_upload
+          WHERE latest_upload.request_id = client_document_requests.id
+          ORDER BY latest_upload.id DESC LIMIT 1
+        ) AS latest_ai_status,
+        (
+          SELECT latest_upload.ai_summary FROM client_uploads AS latest_upload
+          WHERE latest_upload.request_id = client_document_requests.id
+          ORDER BY latest_upload.id DESC LIMIT 1
+        ) AS latest_ai_summary,
+        (
+          SELECT latest_upload.ai_error FROM client_uploads AS latest_upload
+          WHERE latest_upload.request_id = client_document_requests.id
+          ORDER BY latest_upload.id DESC LIMIT 1
+        ) AS latest_ai_error,
+        (
+          SELECT latest_upload.ai_model FROM client_uploads AS latest_upload
+          WHERE latest_upload.request_id = client_document_requests.id
+          ORDER BY latest_upload.id DESC LIMIT 1
+        ) AS latest_ai_model
       FROM client_document_requests
       JOIN firm_clients ON firm_clients.id = client_document_requests.client_id
       LEFT JOIN client_uploads ON client_uploads.request_id = client_document_requests.id
       GROUP BY client_document_requests.id
-      ORDER BY client_document_requests.created_at DESC
-      LIMIT 50
+      ORDER BY
+        client_document_requests.case_id DESC,
+        CASE client_document_requests.document_type
+          WHEN 'claimant_id' THEN 1
+          WHEN 'police_accident_report' THEN 2
+          WHEN 'client_accident_affidavit' THEN 3
+          WHEN 'medical_documents' THEN 4
+          WHEN 'medical_expenses' THEN 5
+          WHEN 'employment_income' THEN 6
+          WHEN 'banking_proof' THEN 7
+          WHEN 'photographs' THEN 8
+          ELSE 99
+        END,
+        client_document_requests.id
     `).all();
 
     const medicalAssessmentRequests = firmDb.prepare(`
@@ -299,26 +448,86 @@ function getWorkspacePayload(firm, req) {
         full_name COLLATE NOCASE
     `).all().map(serializeFirmDoctor);
 
+    const canViewAllMatters = req.user?.role === 'admin' || req.firmAccess?.firm_role === 'firm_admin';
+    const visibleCases = canViewAllMatters
+      ? enrichedCases
+      : enrichedCases.filter((caseRecord) => (
+          Number(caseRecord.responsible_lawyer_user_id) === Number(req.user?.id)
+          || Number(caseRecord.assigned_assistant_user_id) === Number(req.user?.id)
+        ));
+    const visibleCaseIds = new Set(visibleCases.map((caseRecord) => Number(caseRecord.id)));
+    const visibleClientIds = new Set(visibleCases.map((caseRecord) => Number(caseRecord.client_id)));
+    const visibleClients = canViewAllMatters
+      ? clients
+      : clients.filter((client) => visibleClientIds.has(Number(client.id)));
+    const visibleDocumentRequests = canViewAllMatters
+      ? documentRequests
+      : documentRequests.filter((request) => visibleCaseIds.has(Number(request.case_id)));
+    const visibleMedicalAssessmentRequests = canViewAllMatters
+      ? medicalAssessmentRequests
+      : medicalAssessmentRequests.filter((request) => visibleCaseIds.has(Number(request.case_id)));
+    const claimForms = getClaimFormAttachments(firmDb);
+    const visibleClaimForms = canViewAllMatters
+      ? claimForms
+      : claimForms.filter((form) => visibleCaseIds.has(Number(form.case_id)));
+
     const stats = {
       clients: firmDb.prepare('SELECT COUNT(*) AS count FROM firm_clients').get().count,
       openCases: firmDb.prepare("SELECT COUNT(*) AS count FROM raf_cases WHERE status != 'closed'").get().count,
-      requestedDocuments: firmDb.prepare("SELECT COUNT(*) AS count FROM client_document_requests WHERE status = 'requested'").get().count,
-      uploadedDocuments: firmDb.prepare('SELECT COUNT(*) AS count FROM client_uploads').get().count,
+      requestedDocuments: firmDb.prepare(`
+        SELECT COUNT(*) AS count
+        FROM client_document_requests
+        WHERE ${clientUploadDocumentCondition}
+          AND status != 'uploaded'
+          AND NOT EXISTS (
+            SELECT 1 FROM client_uploads
+            WHERE client_uploads.request_id = client_document_requests.id
+          )
+      `).get().count,
+      uploadedDocuments: firmDb.prepare(`
+        SELECT COUNT(*) AS count
+        FROM client_document_requests
+        WHERE ${clientUploadDocumentCondition}
+          AND (
+            status = 'uploaded'
+            OR EXISTS (
+              SELECT 1 FROM client_uploads
+              WHERE client_uploads.request_id = client_document_requests.id
+            )
+          )
+      `).get().count,
       doctors: doctors.length,
       activeDoctors: doctors.filter((doctor) => doctor.status === 'active').length,
       autoReminders: clients.filter((client) => client.auto_reminders_enabled && client.pending_documents > 0).length,
       remindersDue: clients.filter((client) => client.reminder_due).length
     };
+    if (!canViewAllMatters) {
+      stats.clients = visibleClients.length;
+      stats.openCases = visibleCases.filter((caseRecord) => caseRecord.status !== 'closed').length;
+      stats.requestedDocuments = visibleDocumentRequests.filter((request) => (
+        request.status !== 'uploaded' && Number(request.upload_count || 0) === 0
+      )).length;
+      stats.uploadedDocuments = visibleDocumentRequests.filter((request) => (
+        request.status === 'uploaded' || Number(request.upload_count || 0) > 0
+      )).length;
+      stats.autoReminders = visibleClients.filter((client) => client.auto_reminders_enabled && client.pending_documents > 0).length;
+      stats.remindersDue = visibleClients.filter((client) => client.reminder_due).length;
+    }
 
     return {
       firm: serializeFirm(firm),
       stats,
-      clients,
-      cases,
-      documentRequests,
-      medicalAssessmentRequests,
+      clients: visibleClients,
+      cases: visibleCases,
+      teamMembers,
+      documentRequests: visibleDocumentRequests,
+      medicalAssessmentRequests: visibleMedicalAssessmentRequests,
       doctors,
-      claimForms: getClaimFormAttachments(firmDb)
+      claimForms: visibleClaimForms,
+      permissions: {
+        can_manage_team: canViewAllMatters,
+        can_view_all_matters: canViewAllMatters
+      }
     };
   } finally {
     firmDb.close();
@@ -326,65 +535,13 @@ function getWorkspacePayload(firm, req) {
 }
 
 function createDefaultDocumentRequests(firmDb, clientId, caseId, context = {}) {
-  const claimAmounts = context.claimAmounts || {};
-  const requiredForms = context.requiredForms || [];
-  const requests = [
-    ['claimant_id', 'Claimant ID or passport'],
-    ['proof_of_address', 'Proof of residential address'],
-    ['police_accident_report', 'Police accident report'],
-    ['police_case_information', 'Police case information'],
-    ['hospital_records', 'Hospital records'],
-    ['banking_proof', 'Proof of banking details'],
-    ['power_of_attorney', 'Power of attorney'],
-    ['consent_forms', 'Consent forms']
-  ];
-
-  for (const formName of requiredForms) {
-    requests.push([
-      formName.toLowerCase().replace(/\s+/g, '_'),
-      `${formName} prescribed form`
-    ]);
-  }
-
-  if (hasPositiveAmount(claimAmounts.medical_expenses) || hasPositiveAmount(claimAmounts.future_medical_expenses)) {
-    requests.push(['medical_invoices', 'Medical invoices']);
-  }
-
-  if (hasPositiveAmount(claimAmounts.loss_of_earnings)) {
-    requests.push(['employment_confirmation', 'Employment confirmation']);
-    requests.push(['salary_slips', 'Salary slips']);
-  }
-
-  if (hasPositiveAmount(claimAmounts.loss_of_support)) {
-    requests.push(['marriage_certificate', 'Marriage certificate']);
-    requests.push(['birth_certificates', 'Birth certificates']);
-    requests.push(['proof_of_dependency', 'Proof of dependency']);
-  }
-
-  if (hasPositiveAmount(claimAmounts.funeral_expenses)) {
-    requests.push(['death_certificate', 'Death certificate']);
-    requests.push(['funeral_invoices', 'Funeral invoices']);
-  }
-
-  if (hasPositiveAmount(claimAmounts.general_damages)) {
-    requests.push(['raf4_assessment', 'RAF 4 serious injury assessment']);
-    requests.push(['supporting_medical_reports', 'Supporting medical reports']);
-  }
-
-  requests.push(['accident_photographs', 'Accident photographs']);
-  requests.push(['injury_photographs', 'Injury photographs']);
-  requests.push(['witness_statements', 'Witness statements']);
-
   const insert = firmDb.prepare(`
-    INSERT INTO client_document_requests (client_id, case_id, document_type, label)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO client_document_requests (client_id, case_id, document_type, label, instructions)
+    VALUES (?, ?, ?, ?, ?)
   `);
 
-  const seen = new Set();
-  for (const [type, label] of requests) {
-    if (seen.has(type)) continue;
-    seen.add(type);
-    insert.run(clientId, caseId, type, label);
+  for (const [type, label, instructions] of coreClientDocumentRequests) {
+    insert.run(clientId, caseId, type, label, instructions);
   }
 }
 
@@ -710,6 +867,62 @@ function buildClaimTemplateData({ firm, claim, fields }) {
     total_claim_amount: claimAmounts.total
   });
 
+  const aiProfile = parseJson(claim.ai_structured_json, { documents: [] });
+  const aiDocuments = Array.isArray(aiProfile.documents) ? aiProfile.documents : [];
+  for (const aiDocument of aiDocuments) {
+    const extraction = aiDocument?.extraction || {};
+    const claimant = Array.isArray(extraction.parties)
+      ? extraction.parties.find((party) => /claimant|client|patient|injured/i.test(party?.role || '')) || extraction.parties[0] || {}
+      : {};
+    const accident = extraction.accident || {};
+    const medical = extraction.medical || {};
+    const employment = extraction.employment || {};
+    const extractedBanking = extraction.banking || {};
+
+    mergeMissingData(baseData, {
+      first_name: claimant.first_name,
+      surname: claimant.surname,
+      full_name: claimant.full_name,
+      claimant_name: claimant.full_name,
+      id_number: claimant.id_number,
+      passport_number: claimant.passport_number,
+      date_of_birth: claimant.date_of_birth,
+      residential_address: claimant.address,
+      address: claimant.address,
+      accident_date: accident.date,
+      date_of_accident: accident.date,
+      accident_time: accident.time,
+      accident_location: accident.location,
+      police_station: accident.police_station,
+      police_case_number: accident.police_case_number,
+      accident_report_number: accident.accident_report_number,
+      claimant_role: accident.claimant_role,
+      collision_description: accident.description,
+      accident_description: accident.description,
+      injuries: Array.isArray(medical.injuries) ? medical.injuries.join(', ') : '',
+      diagnosis: Array.isArray(medical.diagnoses) ? medical.diagnoses.join(', ') : '',
+      treatment: Array.isArray(medical.treatment) ? medical.treatment.join(', ') : '',
+      occupation: employment.occupation,
+      employer: employment.employer,
+      income_before_accident: employment.income_before_accident,
+      income_after_accident: employment.income_after_accident,
+      bank_name: extractedBanking.bank_name,
+      account_holder: extractedBanking.account_holder,
+      account_number: extractedBanking.account_number,
+      branch_code: extractedBanking.branch_code,
+      branch_name: extractedBanking.branch_name,
+      account_type: extractedBanking.account_type,
+      ai_case_summary: extraction.summary
+    });
+
+    for (const item of Array.isArray(extraction.template_values) ? extraction.template_values : []) {
+      mergeMissingData(baseData, { [item.field_name]: item.value });
+    }
+    for (const item of Array.isArray(extraction.facts) ? extraction.facts : []) {
+      mergeMissingData(baseData, { [item.key]: item.value });
+    }
+  }
+
   const normalizedData = Object.entries(baseData).reduce((mapped, [key, value]) => {
     mapped[normalizeDataKey(key)] = value ?? '';
     return mapped;
@@ -768,12 +981,47 @@ function requireFirmAccess(options = {}) {
 
     const access = getUserFirmAccess(req.user.id, firm.id);
     if (!access) return res.status(403).json({ error: 'Access to this firm workspace is required' });
-    if (options.write && access.access_level === 'viewer') {
+    if (options.write && (req.user?.role === 'viewer' || access.access_level === 'viewer')) {
       return res.status(403).json({ error: 'Viewer access cannot change firm records' });
     }
 
     req.firmAccess = access;
     return next();
+  };
+}
+
+function requireAssignedMatter(options = {}) {
+  return (req, res, next) => {
+    if (req.user?.role === 'admin' || req.firmAccess?.firm_role === 'firm_admin') return next();
+
+    const firmDb = openFirmDatabase(req.firm);
+    try {
+      let permitted = null;
+      if (options.caseParam) {
+        permitted = firmDb.prepare(`
+          SELECT id FROM raf_cases
+          WHERE id = ? AND (responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?)
+        `).get(req.params[options.caseParam], req.user.id, req.user.id);
+      } else if (options.clientParam) {
+        permitted = firmDb.prepare(`
+          SELECT id FROM raf_cases
+          WHERE client_id = ? AND (responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?)
+          LIMIT 1
+        `).get(req.params[options.clientParam], req.user.id, req.user.id);
+      } else if (options.requestParam) {
+        permitted = firmDb.prepare(`
+          SELECT raf_cases.id
+          FROM client_document_requests
+          JOIN raf_cases ON raf_cases.id = client_document_requests.case_id
+          WHERE client_document_requests.id = ?
+            AND (raf_cases.responsible_lawyer_user_id = ? OR raf_cases.assigned_assistant_user_id = ?)
+        `).get(req.params[options.requestParam], req.user.id, req.user.id);
+      }
+      if (!permitted) return res.status(403).json({ error: 'This matter is not assigned to you' });
+      return next();
+    } finally {
+      firmDb.close();
+    }
   };
 }
 
@@ -793,8 +1041,16 @@ firmsRouter.get('/', requireAdminOnly, (_req, res) => {
   res.json({ firms, summary });
 });
 
-firmsRouter.get('/messages/overview', requireAdminOnly, (_req, res) => {
-  const firms = db.prepare('SELECT * FROM firms ORDER BY name COLLATE NOCASE').all();
+firmsRouter.get('/messages/overview', (req, res) => {
+  const firms = req.user?.role === 'admin'
+    ? db.prepare('SELECT * FROM firms ORDER BY name COLLATE NOCASE').all()
+    : db.prepare(`
+        SELECT firms.*
+        FROM firms
+        JOIN user_firm_access ON user_firm_access.firm_id = firms.id
+        WHERE user_firm_access.user_id = ?
+        ORDER BY firms.name COLLATE NOCASE
+      `).all(req.user.id);
 
   const rows = firms.map((firm) => {
     const latestMessage = db.prepare(`
@@ -934,6 +1190,272 @@ firmsRouter.get('/:id/workspace', requireFirmAccess(), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
   res.json(getWorkspacePayload(firm, req));
+});
+
+firmsRouter.get('/:id/team', requireFirmAccess(), (req, res) => {
+  const firm = req.firm;
+  const firmDb = openFirmDatabase(firm);
+  try {
+    return res.json({
+      firm: serializeFirm(firm),
+      can_manage_team: canManageFirmTeam(req),
+      members: getFirmTeamMembers(firm.id, firmDb)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.post('/:id/team', requireFirmAccess({ write: true }), async (req, res, next) => {
+  const firm = req.firm;
+  if (!canManageFirmTeam(req)) return res.status(403).json({ error: 'Firm Admin access is required to add team members' });
+
+  const name = cleanString(req.body?.name);
+  const email = cleanString(req.body?.email).toLowerCase();
+  const phone = cleanString(req.body?.phone);
+  const jobTitle = cleanString(req.body?.job_title);
+  const firmRole = cleanString(req.body?.firm_role) || 'assistant';
+  const status = cleanString(req.body?.status) || 'active';
+  const sendInvitation = Boolean(req.body?.send_invitation);
+  const suppliedPassword = String(req.body?.password || '');
+  const canSubmitClaims = firmRole === 'assistant' && Boolean(req.body?.can_submit_claims);
+
+  if (!name || !email) return res.status(400).json({ error: 'Full name and email address are required' });
+  if (!email.includes('@')) return res.status(400).json({ error: 'Enter a valid email address' });
+  if (!firmTeamRoles.has(firmRole)) return res.status(400).json({ error: 'Choose Firm Admin, Lawyer, or Assistant' });
+  if (!teamAccountStatuses.has(status)) return res.status(400).json({ error: 'Choose a valid account status' });
+  if (!sendInvitation && suppliedPassword.length < 8) return res.status(400).json({ error: 'Temporary password must be at least 8 characters' });
+
+  const existingUser = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (existingUser?.role === 'admin') return res.status(409).json({ error: 'This email belongs to a workspace administrator' });
+  if (existingUser) {
+    const otherAccess = db.prepare('SELECT firm_id FROM user_firm_access WHERE user_id = ? AND firm_id != ?').get(existingUser.id, firm.id);
+    if (otherAccess) return res.status(409).json({ error: 'This user already belongs to another law firm' });
+    const sameAccess = db.prepare('SELECT id FROM user_firm_access WHERE user_id = ? AND firm_id = ?').get(existingUser.id, firm.id);
+    if (sameAccess) return res.status(409).json({ error: 'This user is already a member of this firm' });
+  }
+
+  const temporaryPassword = sendInvitation ? `Raf-${randomUUID().slice(0, 8)}!` : suppliedPassword;
+  const passwordHash = bcrypt.hashSync(temporaryPassword, 12);
+  const createMember = db.transaction(() => {
+    let userId = existingUser?.id;
+    if (existingUser) {
+      db.prepare(`
+        UPDATE users
+        SET name = ?, password_hash = ?, role = 'staff', status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(name, passwordHash, status, userId);
+    } else {
+      const result = db.prepare(`
+        INSERT INTO users (name, email, password_hash, role, status, approved_by_user_id, approved_at)
+        VALUES (?, ?, ?, 'staff', ?, ?, ?)
+      `).run(name, email, passwordHash, status, req.user.id, status === 'active' ? new Date().toISOString() : null);
+      userId = result.lastInsertRowid;
+    }
+
+    db.prepare(`
+      INSERT INTO user_firm_access
+        (user_id, firm_id, access_level, firm_role, phone, job_title, can_submit_claims)
+      VALUES (?, ?, 'staff', ?, ?, ?, ?)
+    `).run(userId, firm.id, firmRole, phone || null, jobTitle || null, canSubmitClaims ? 1 : 0);
+    return userId;
+  });
+
+  const userId = createMember();
+  let invitation = { sent: false };
+  if (sendInvitation) {
+    try {
+      const providerResult = await sendPowerMail({
+        to: email,
+        subject: `${firm.name}: RAFFlow team invitation`,
+        body: `Hi ${name},\n\nYou have been added to ${firm.name} on RAFFlow as ${firmRole.replace('_', ' ')}.\n\nLogin: ${config.clientOrigin.replace(/\/$/, '')}/login\nEmail: ${email}\nTemporary password: ${temporaryPassword}\n\nPlease sign in and change this temporary password with your administrator.`,
+        data: {
+          message_type: 'firm_team_invitation',
+          firm_name: firm.name,
+          team_member_name: name,
+          role: firmRole,
+          login_url: `${config.clientOrigin.replace(/\/$/, '')}/login`,
+          temporary_password: temporaryPassword
+        }
+      });
+      invitation = { sent: true, provider_result: providerResult };
+    } catch (error) {
+      invitation = { sent: false, error: error.message };
+    }
+  }
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    return res.status(201).json({
+      member: getFirmTeamMembers(firm.id, firmDb).find((member) => Number(member.id) === Number(userId)),
+      members: getFirmTeamMembers(firm.id, firmDb),
+      invitation,
+      temporary_password: sendInvitation && !invitation.sent ? temporaryPassword : undefined
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.patch('/:id/team/:userId', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = req.firm;
+  if (!canManageFirmTeam(req)) return res.status(403).json({ error: 'Firm Admin access is required to edit team members' });
+
+  const member = getFirmMember(firm.id, req.params.userId);
+  if (!member) return res.status(404).json({ error: 'Team member not found' });
+  const name = cleanString(req.body?.name) || member.name;
+  const email = cleanString(req.body?.email).toLowerCase() || member.email;
+  const phone = req.body?.phone === undefined ? cleanString(member.phone) : cleanString(req.body.phone);
+  const jobTitle = req.body?.job_title === undefined ? cleanString(member.job_title) : cleanString(req.body.job_title);
+  const firmRole = cleanString(req.body?.firm_role) || member.firm_role;
+  const status = cleanString(req.body?.status) || member.status;
+  const newPassword = cleanString(req.body?.password);
+  const canSubmitClaims = firmRole === 'assistant' && Boolean(req.body?.can_submit_claims);
+  if (!firmTeamRoles.has(firmRole)) return res.status(400).json({ error: 'Choose Firm Admin, Lawyer, or Assistant' });
+  if (!teamAccountStatuses.has(status)) return res.status(400).json({ error: 'Choose a valid account status' });
+  if (newPassword && newPassword.length < 8) return res.status(400).json({ error: 'Temporary password must be at least 8 characters' });
+  const duplicate = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(email, member.id);
+  if (duplicate) return res.status(409).json({ error: 'Email address is already in use' });
+
+  if (member.firm_role === 'firm_admin' && (firmRole !== 'firm_admin' || status !== 'active')) {
+    const otherAdmins = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM user_firm_access
+      JOIN users ON users.id = user_firm_access.user_id
+      WHERE user_firm_access.firm_id = ? AND user_firm_access.firm_role = 'firm_admin'
+        AND users.status = 'active' AND users.id != ?
+    `).get(firm.id, member.id).count;
+    if (Number(otherAdmins) < 1) return res.status(400).json({ error: 'At least one active Firm Admin is required' });
+  }
+
+  const updateMember = db.transaction(() => {
+    if (newPassword) {
+      db.prepare(`UPDATE users SET name = ?, email = ?, status = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .run(name, email, status, bcrypt.hashSync(newPassword, 12), member.id);
+    } else {
+      db.prepare(`UPDATE users SET name = ?, email = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .run(name, email, status, member.id);
+    }
+    db.prepare(`
+      UPDATE user_firm_access
+      SET firm_role = ?, access_level = 'staff', phone = ?, job_title = ?, can_submit_claims = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND firm_id = ?
+    `).run(firmRole, phone || null, jobTitle || null, canSubmitClaims ? 1 : 0, member.id, firm.id);
+  });
+  updateMember();
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    return res.json({
+      member: getFirmTeamMembers(firm.id, firmDb).find((row) => Number(row.id) === Number(member.id)),
+      members: getFirmTeamMembers(firm.id, firmDb)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.get('/:id/my-matters', requireFirmAccess(), (req, res) => {
+  const firm = req.firm;
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const teamMembers = getFirmTeamMembers(firm.id, firmDb);
+    const teamById = new Map(teamMembers.map((member) => [Number(member.id), member]));
+    const matters = firmDb.prepare(`
+      SELECT raf_cases.*, firm_clients.first_name, firm_clients.surname,
+        (SELECT COUNT(*) FROM client_document_requests WHERE case_id = raf_cases.id) AS requested_documents,
+        (SELECT COUNT(*) FROM client_document_requests WHERE case_id = raf_cases.id AND status = 'uploaded') AS uploaded_documents
+      FROM raf_cases
+      JOIN firm_clients ON firm_clients.id = raf_cases.client_id
+      WHERE raf_cases.responsible_lawyer_user_id = ? OR raf_cases.assigned_assistant_user_id = ?
+      ORDER BY raf_cases.updated_at DESC, raf_cases.opened_at DESC
+    `).all(req.user.id, req.user.id).map((matter) => ({
+      ...matter,
+      responsible_lawyer: teamById.get(Number(matter.responsible_lawyer_user_id)) || null,
+      assigned_assistant: teamById.get(Number(matter.assigned_assistant_user_id)) || null
+    }));
+    const notifications = db.prepare(`
+      SELECT * FROM firm_user_notifications
+      WHERE user_id = ? AND firm_id = ? AND notification_type = 'matter_assignment'
+      ORDER BY created_at DESC, id DESC
+      LIMIT 20
+    `).all(req.user.id, firm.id);
+    db.prepare(`
+      UPDATE firm_user_notifications SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+      WHERE user_id = ? AND firm_id = ? AND notification_type = 'matter_assignment'
+    `).run(req.user.id, firm.id);
+    return res.json({ firm: serializeFirm(firm), matters, teamMembers, notifications });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.patch('/:id/claims/:caseId/assignment', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = req.firm;
+  if (!canManageFirmTeam(req)) return res.status(403).json({ error: 'Firm Admin access is required to assign matters' });
+  const lawyerId = Number(req.body?.responsible_lawyer_user_id || 0) || null;
+  const assistantId = Number(req.body?.assigned_assistant_user_id || 0) || null;
+  const assignmentNote = cleanString(req.body?.assignment_note);
+  const reason = cleanString(req.body?.reason);
+  if (!lawyerId) return res.status(400).json({ error: 'Choose a responsible lawyer' });
+
+  const lawyer = getFirmMember(firm.id, lawyerId);
+  const assistant = assistantId ? getFirmMember(firm.id, assistantId) : null;
+  if (!lawyer || lawyer.status !== 'active' || !['lawyer', 'firm_admin'].includes(lawyer.firm_role)) {
+    return res.status(400).json({ error: 'Choose an active lawyer from this firm' });
+  }
+  if (assistantId && (!assistant || assistant.status !== 'active' || assistant.firm_role !== 'assistant')) {
+    return res.status(400).json({ error: 'Choose an active assistant from this firm' });
+  }
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const claim = firmDb.prepare('SELECT * FROM raf_cases WHERE id = ?').get(req.params.caseId);
+    if (!claim) return res.status(404).json({ error: 'Matter not found' });
+    const isReassignment = Boolean(claim.responsible_lawyer_user_id || claim.assigned_assistant_user_id);
+    const changed = Number(claim.responsible_lawyer_user_id || 0) !== Number(lawyerId || 0)
+      || Number(claim.assigned_assistant_user_id || 0) !== Number(assistantId || 0);
+    if (!changed) return res.status(400).json({ error: 'Choose a different lawyer or assistant to reassign this matter' });
+    if (isReassignment && !reason) return res.status(400).json({ error: 'Add a reason for reassignment' });
+
+    const assignMatter = firmDb.transaction(() => {
+      firmDb.prepare(`
+        UPDATE raf_cases
+        SET responsible_lawyer_user_id = ?, assigned_assistant_user_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(lawyerId, assistantId, claim.id);
+      firmDb.prepare(`
+        INSERT INTO matter_assignment_history
+          (case_id, previous_lawyer_user_id, previous_assistant_user_id,
+           responsible_lawyer_user_id, assigned_assistant_user_id, assigned_by_user_id,
+           assignment_note, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        claim.id,
+        claim.responsible_lawyer_user_id || null,
+        claim.assigned_assistant_user_id || null,
+        lawyerId,
+        assistantId,
+        req.user.id,
+        assignmentNote || null,
+        reason || null
+      );
+    });
+    assignMatter();
+
+    const action = isReassignment ? 'reassigned' : 'assigned';
+    addAssignmentNotification({ userId: lawyerId, firmId: firm.id, caseId: claim.id, message: `${claim.case_reference} was ${action} to you as responsible lawyer.` });
+    if (assistantId) addAssignmentNotification({ userId: assistantId, firmId: firm.id, caseId: claim.id, message: `${claim.case_reference} was ${action} to you as assigned assistant.` });
+
+    return res.json({
+      workspace: getWorkspacePayload(firm, req),
+      history: firmDb.prepare('SELECT * FROM matter_assignment_history WHERE case_id = ? ORDER BY created_at DESC, id DESC').all(claim.id)
+    });
+  } finally {
+    firmDb.close();
+  }
 });
 
 firmsRouter.post('/:id/doctors', requireFirmAccess({ write: true }), (req, res) => {
@@ -1086,7 +1608,7 @@ firmsRouter.get('/:id/documents', requireFirmAccess(), (req, res) => {
   }
 });
 
-firmsRouter.get('/:id/claims/:caseId/forms', requireFirmAccess(), (req, res) => {
+firmsRouter.get('/:id/claims/:caseId/forms', requireFirmAccess(), requireAssignedMatter({ caseParam: 'caseId' }), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1106,7 +1628,7 @@ firmsRouter.get('/:id/claims/:caseId/forms', requireFirmAccess(), (req, res) => 
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/medical-assessments', requireFirmAccess({ write: true }), async (req, res) => {
+firmsRouter.post('/:id/claims/:caseId/medical-assessments', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), async (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1198,7 +1720,7 @@ firmsRouter.post('/:id/claims/:caseId/medical-assessments', requireFirmAccess({ 
   }
 });
 
-firmsRouter.patch('/:id/claims/:caseId/medical-assessments/:requestId', requireFirmAccess({ write: true }), async (req, res) => {
+firmsRouter.patch('/:id/claims/:caseId/medical-assessments/:requestId', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), async (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1297,7 +1819,7 @@ firmsRouter.patch('/:id/claims/:caseId/medical-assessments/:requestId', requireF
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/forms', requireFirmAccess({ write: true }), async (req, res, next) => {
+firmsRouter.post('/:id/claims/:caseId/forms', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1354,13 +1876,13 @@ firmsRouter.post('/:id/claims/:caseId/forms', requireFirmAccess({ write: true })
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', requireFirmAccess({ write: true }), async (req, res, next) => {
+firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
   const firmDb = openFirmDatabase(firm);
   try {
-    const claim = getClaimWithClient(firmDb, req.params.caseId);
+    let claim = getClaimWithClient(firmDb, req.params.caseId);
     if (!claim) return res.status(404).json({ error: 'Claim not found' });
 
     const attachment = firmDb.prepare('SELECT * FROM claim_form_templates WHERE id = ? AND case_id = ?')
@@ -1369,18 +1891,36 @@ firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', requireFirmA
 
     const template = db.prepare('SELECT * FROM document_templates WHERE id = ? AND status = ?').get(attachment.template_id, 'ready');
     if (!template) return res.status(404).json({ error: 'Template is not ready or was not found' });
+
+    const pendingUploads = firmDb.prepare(`
+      SELECT client_uploads.id
+      FROM client_uploads
+      JOIN client_document_requests ON client_document_requests.id = client_uploads.request_id
+      WHERE client_document_requests.case_id = ?
+        AND COALESCE(client_uploads.ai_status, 'pending') != 'completed'
+      ORDER BY client_uploads.id
+    `).all(claim.id);
+    const aiResults = [];
+    for (const upload of pendingUploads) {
+      aiResults.push(await processUploadedDocumentWithAi({ firmDb, uploadId: upload.id }));
+    }
+
+    claim = getClaimWithClient(firmDb, claim.id);
     const fields = getTemplateFields(template.id).map(serializeField);
     const generatedData = buildClaimTemplateData({ firm, claim, fields });
     const dataOverride = mergeManualValues(generatedData, req.body?.data || {});
 
-    const document = await generateClaimFormDocument({
-      firm,
-      claim,
+    const document = await generateFilledPdf({
       template,
+      fields,
+      data: dataOverride,
       userId: req.user.id,
-      sourceType: 'claim_form_ai',
-      dataOverride
+      sourceType: 'claim_form_ai'
     });
+
+    const filledInputs = Object.values(dataOverride).filter(hasManualValue).length;
+    const finalAiProfile = parseJson(claim.ai_structured_json, { documents: [] });
+    const aiProfileDocumentCount = Array.isArray(finalAiProfile.documents) ? finalAiProfile.documents.length : 0;
 
     firmDb.prepare(`
       UPDATE claim_form_templates
@@ -1393,6 +1933,17 @@ firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', requireFirmA
       claim,
       attached_forms: getClaimFormAttachments(firmDb, claim.id),
       document,
+      ai_results: aiResults.map((result) => ({
+        status: result.status,
+        filled_templates: result.filledTemplates || 0,
+        error: result.error || null
+      })),
+      input_status: {
+        filled: filledInputs,
+        total: fields.length,
+        percentage: fields.length ? Math.round((filledInputs / fields.length) * 100) : 0
+      },
+      ai_profile_document_count: aiProfileDocumentCount,
       workspace: getWorkspacePayload(firm, req)
     });
   } catch (error) {
@@ -1402,7 +1953,237 @@ firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', requireFirmA
   }
 });
 
-firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-manual', requireFirmAccess({ write: true }), async (req, res, next) => {
+function getAiAccessibleClaims(firmDb, req) {
+  const canProcessAll = req.user?.role === 'admin' || req.firmAccess?.firm_role === 'firm_admin';
+  return canProcessAll
+    ? firmDb.prepare('SELECT id FROM raf_cases ORDER BY id').all()
+    : firmDb.prepare(`
+        SELECT id FROM raf_cases
+        WHERE responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?
+        ORDER BY id
+      `).all(req.user.id, req.user.id);
+}
+
+function scopeAiClaims(claims, requestedCaseId) {
+  if (requestedCaseId == null || requestedCaseId === '') return claims;
+  const caseId = Number(requestedCaseId);
+  if (!Number.isInteger(caseId) || caseId <= 0) {
+    const error = new Error('A valid claim is required for this AI scan');
+    error.status = 400;
+    throw error;
+  }
+  const claim = claims.find((item) => Number(item.id) === caseId);
+  if (!claim) {
+    const error = new Error('This matter is not assigned to you');
+    error.status = 403;
+    throw error;
+  }
+  return [claim];
+}
+
+firmsRouter.get('/:id/claims/refresh-ai/plan', requireFirmAccess(), (req, res, next) => {
+  const firm = req.firm;
+  const firmDb = openFirmDatabase(firm);
+
+  try {
+    const claims = scopeAiClaims(getAiAccessibleClaims(firmDb, req), req.query.case_id);
+    const claimIds = claims.map((claim) => Number(claim.id));
+    if (!claimIds.length) return res.json({ model: config.aiExtractionModel, documents: [] });
+    const placeholders = claimIds.map(() => '?').join(', ');
+    const documents = firmDb.prepare(`
+      SELECT
+        client_uploads.id AS upload_id,
+        client_uploads.original_filename,
+        COALESCE(client_uploads.ai_status, 'pending') AS ai_status,
+        client_uploads.ai_model,
+        client_document_requests.label AS document_label,
+        raf_cases.id AS case_id,
+        raf_cases.case_reference,
+        firm_clients.first_name,
+        firm_clients.surname
+      FROM client_uploads
+      JOIN client_document_requests ON client_document_requests.id = client_uploads.request_id
+      JOIN raf_cases ON raf_cases.id = client_document_requests.case_id
+      JOIN firm_clients ON firm_clients.id = raf_cases.client_id
+      WHERE raf_cases.id IN (${placeholders})
+      ORDER BY firm_clients.surname COLLATE NOCASE, firm_clients.first_name COLLATE NOCASE,
+        raf_cases.id, client_uploads.id
+    `).all(...claimIds);
+
+    return res.json({ model: config.aiExtractionModel, documents });
+  } catch (error) {
+    return next(error);
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.post('/:id/claims/refresh-ai/uploads/:uploadId', requireFirmAccess({ write: true }), async (req, res, next) => {
+  const firm = req.firm;
+  const firmDb = openFirmDatabase(firm);
+
+  try {
+    const permittedCaseIds = new Set(getAiAccessibleClaims(firmDb, req).map((claim) => Number(claim.id)));
+    const upload = firmDb.prepare(`
+      SELECT
+        client_uploads.id AS upload_id,
+        client_uploads.original_filename,
+        client_document_requests.label AS document_label,
+        raf_cases.id AS case_id,
+        raf_cases.case_reference,
+        firm_clients.first_name,
+        firm_clients.surname
+      FROM client_uploads
+      JOIN client_document_requests ON client_document_requests.id = client_uploads.request_id
+      JOIN raf_cases ON raf_cases.id = client_document_requests.case_id
+      JOIN firm_clients ON firm_clients.id = raf_cases.client_id
+      WHERE client_uploads.id = ?
+    `).get(req.params.uploadId);
+    if (!upload) return res.status(404).json({ error: 'Uploaded document not found' });
+    if (!permittedCaseIds.has(Number(upload.case_id))) {
+      return res.status(403).json({ error: 'This matter is not assigned to you' });
+    }
+
+    const result = await processUploadedDocumentWithAi({ firmDb, uploadId: upload.upload_id });
+    return res.json({
+      document: upload,
+      status: result.status,
+      model: config.aiExtractionModel,
+      filled_templates: Number(result.filledTemplates || 0),
+      error: result.error || null
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.post('/:id/claims/refresh-ai', requireFirmAccess({ write: true }), async (req, res, next) => {
+  const firm = req.firm;
+  const firmDb = openFirmDatabase(firm);
+
+  try {
+    const claims = scopeAiClaims(getAiAccessibleClaims(firmDb, req), req.body?.case_id);
+
+    const summary = {
+      claims_checked: claims.length,
+      uploads_checked: 0,
+      uploads_extracted: 0,
+      uploads_failed: 0,
+      forms_updated: 0,
+      forms_failed: 0,
+      inputs_added: 0,
+      fields_checked: 0,
+      fillable_fields: 0,
+      field_review_required: 0,
+      field_review_failures: 0,
+      field_results: []
+    };
+
+    for (const caseRecord of claims) {
+      const uploads = req.body?.skip_uploads ? [] : firmDb.prepare(`
+        SELECT client_uploads.id
+        FROM client_uploads
+        JOIN client_document_requests ON client_document_requests.id = client_uploads.request_id
+        WHERE client_document_requests.case_id = ?
+        ORDER BY client_uploads.id
+      `).all(caseRecord.id);
+
+      summary.uploads_checked += uploads.length;
+      for (const upload of uploads) {
+        const result = await processUploadedDocumentWithAi({ firmDb, uploadId: upload.id });
+        if (result.status === 'completed') {
+          summary.uploads_extracted += 1;
+          summary.forms_updated += Number(result.filledTemplates || 0);
+        }
+        else summary.uploads_failed += 1;
+      }
+
+      const claim = getClaimWithClient(firmDb, caseRecord.id);
+      if (!claim) continue;
+      const attachments = firmDb.prepare('SELECT * FROM claim_form_templates WHERE case_id = ? ORDER BY id')
+        .all(claim.id);
+
+      for (const attachment of attachments) {
+        try {
+          const template = db.prepare('SELECT * FROM document_templates WHERE id = ? AND status = ?')
+            .get(attachment.template_id, 'ready');
+          if (!template) continue;
+
+          const fields = getTemplateFields(template.id).map(serializeField);
+          if (!fields.length) continue;
+          const existingDocument = attachment.generated_document_id
+            ? db.prepare('SELECT * FROM generated_documents WHERE id = ?').get(attachment.generated_document_id)
+            : null;
+          const existingData = parseJson(existingDocument?.input_json, {});
+          const generatedData = buildClaimTemplateData({ firm, claim, fields });
+          const mergedData = mergeManualValues(generatedData, existingData);
+          const emptyBefore = fields.filter((field) => !hasManualValue(existingData[field.name]));
+          const mappedResults = emptyBefore
+            .filter((field) => hasManualValue(mergedData[field.name]))
+            .map((field) => ({
+              field_name: field.name,
+              label: field.label,
+              status: 'fillable',
+              value: mergedData[field.name],
+              source: 'Claim record or extracted document',
+              reason: 'Matched to an existing verified record value.',
+              confidence: 1
+            }));
+          const aiReview = await reviewMissingTemplateFieldsWithAi({ claim, firm, fields, data: mergedData });
+          const reviewedData = { ...mergedData, ...aiReview.values };
+          const inputsAdded = fields.reduce((count, field) => (
+            !hasManualValue(existingData[field.name]) && hasManualValue(reviewedData[field.name]) ? count + 1 : count
+          ), 0);
+
+          const fieldResults = [...mappedResults, ...aiReview.decisions].map((decision) => ({
+            case_id: claim.id,
+            case_reference: claim.case_reference,
+            client_name: `${claim.first_name} ${claim.surname}`,
+            attachment_id: attachment.id,
+            template_name: template.name,
+            ...decision
+          }));
+          summary.fields_checked += emptyBefore.length;
+          summary.fillable_fields += fieldResults.filter((decision) => decision.status === 'fillable').length;
+          summary.field_review_required += fieldResults.filter((decision) => ['conflict', 'review_failed'].includes(decision.status)).length;
+          summary.field_results.push(...fieldResults);
+          if (aiReview.error) summary.field_review_failures += 1;
+
+          if (!inputsAdded && existingDocument) continue;
+          const document = await generateFilledPdf({
+            template,
+            fields,
+            data: reviewedData,
+            userId: req.user.id,
+            sourceType: 'claim_form_ai_batch'
+          });
+          firmDb.prepare(`
+            UPDATE claim_form_templates
+            SET generated_document_id = ?, status = 'generated', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND case_id = ?
+          `).run(document.id, attachment.id, claim.id);
+          summary.forms_updated += 1;
+          summary.inputs_added += inputsAdded;
+        } catch {
+          summary.forms_failed += 1;
+        }
+      }
+    }
+
+    return res.json({
+      ...summary,
+      workspace: getWorkspacePayload(firm, req)
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-manual', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1447,7 +2228,7 @@ firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-manual', requireF
   }
 });
 
-firmsRouter.patch('/:id/claims/:caseId/forms/:attachmentId/share', requireFirmAccess({ write: true }), (req, res) => {
+firmsRouter.patch('/:id/claims/:caseId/forms/:attachmentId/share', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1474,7 +2255,7 @@ firmsRouter.patch('/:id/claims/:caseId/forms/:attachmentId/share', requireFirmAc
   }
 });
 
-firmsRouter.delete('/:id/claims/:caseId/forms/:attachmentId', requireFirmAccess({ write: true }), (req, res) => {
+firmsRouter.delete('/:id/claims/:caseId/forms/:attachmentId', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1527,7 +2308,10 @@ firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) 
     witnesses,
     claim_amounts: claimAmounts,
     auto_reminders_enabled: autoRemindersEnabled,
-    reminder_time: reminderTimeInput
+    reminder_time: reminderTimeInput,
+    responsible_lawyer_user_id: responsibleLawyerUserIdInput,
+    assigned_assistant_user_id: assignedAssistantUserIdInput,
+    assignment_note: assignmentNoteInput
   } = req.body || {};
 
   const nameParts = cleanString(fullNames).split(/\s+/).filter(Boolean);
@@ -1547,6 +2331,20 @@ firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) 
   const compactClaimAmounts = compactObject(claimAmounts);
   const formSelection = determineRequiredForms(cleanString(accidentDate), compactClaimAmounts);
   const deadlineData = buildDeadlineData(cleanString(accidentDate));
+  const responsibleLawyerUserId = Number(responsibleLawyerUserIdInput || 0) || null;
+  const assignedAssistantUserId = Number(assignedAssistantUserIdInput || 0) || null;
+  if ((responsibleLawyerUserId || assignedAssistantUserId) && !canManageFirmTeam(req)) {
+    return res.status(403).json({ error: 'Firm Admin access is required to assign a new matter' });
+  }
+  const responsibleLawyer = responsibleLawyerUserId ? getFirmMember(firm.id, responsibleLawyerUserId) : null;
+  const assignedAssistant = assignedAssistantUserId ? getFirmMember(firm.id, assignedAssistantUserId) : null;
+  if (responsibleLawyerUserId && (!responsibleLawyer || responsibleLawyer.status !== 'active' || !['lawyer', 'firm_admin'].includes(responsibleLawyer.firm_role))) {
+    return res.status(400).json({ error: 'Choose an active responsible lawyer from this firm' });
+  }
+  if (assignedAssistantUserId && (!assignedAssistant || assignedAssistant.status !== 'active' || assignedAssistant.firm_role !== 'assistant')) {
+    return res.status(400).json({ error: 'Choose an active assistant from this firm' });
+  }
+  if (assignedAssistantUserId && !responsibleLawyerUserId) return res.status(400).json({ error: 'Choose a responsible lawyer before assigning an assistant' });
 
   const firmDb = openFirmDatabase(firm);
 
@@ -1587,9 +2385,10 @@ firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) 
           police_station, police_case_number, claimant_role, collision_description,
           vehicle_json, driver_json, owner_json, witnesses_json, claim_amounts_json,
           statutory_form_set, required_forms_json, lodgement_deadline, internal_deadline,
-          deadline_status, lawyer_review_status, original_tracking_json
+          deadline_status, lawyer_review_status, original_tracking_json,
+          responsible_lawyer_user_id, assigned_assistant_user_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         clientId,
         caseReference,
@@ -1621,19 +2420,56 @@ firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) 
           tracking_number: '',
           delivery_receipt: '',
           raf_receipt_confirmation: ''
-        })
+        }),
+        responsibleLawyerUserId,
+        assignedAssistantUserId
       );
+
+      if (responsibleLawyerUserId) {
+        firmDb.prepare(`
+          INSERT INTO matter_assignment_history
+            (case_id, responsible_lawyer_user_id, assigned_assistant_user_id,
+             assigned_by_user_id, assignment_note)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          caseResult.lastInsertRowid,
+          responsibleLawyerUserId,
+          assignedAssistantUserId,
+          req.user.id,
+          cleanString(assignmentNoteInput) || null
+        );
+      }
 
       createDefaultDocumentRequests(firmDb, clientId, caseResult.lastInsertRowid, {
         claimAmounts: compactClaimAmounts,
         requiredForms: formSelection.required_forms
       });
-      return firmDb.prepare('SELECT * FROM firm_clients WHERE id = ?').get(clientId);
+      return {
+        client: firmDb.prepare('SELECT * FROM firm_clients WHERE id = ?').get(clientId),
+        caseId: caseResult.lastInsertRowid,
+        caseReference
+      };
     });
 
-    const client = createClient();
+    const created = createClient();
+    if (responsibleLawyerUserId) {
+      addAssignmentNotification({
+        userId: responsibleLawyerUserId,
+        firmId: firm.id,
+        caseId: created.caseId,
+        message: `${created.caseReference} was assigned to you as responsible lawyer.`
+      });
+    }
+    if (assignedAssistantUserId) {
+      addAssignmentNotification({
+        userId: assignedAssistantUserId,
+        firmId: firm.id,
+        caseId: created.caseId,
+        message: `${created.caseReference} was assigned to you as assigned assistant.`
+      });
+    }
     res.status(201).json({
-      client: serializeFirmClient(client, config.clientOrigin),
+      client: serializeFirmClient(created.client, config.clientOrigin),
       workspace: getWorkspacePayload(firm, req)
     });
   } finally {
@@ -1641,7 +2477,7 @@ firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) 
   }
 });
 
-firmsRouter.post('/:id/clients/:clientId/invite', requireFirmAccess({ write: true }), async (req, res, next) => {
+firmsRouter.post('/:id/clients/:clientId/invite', requireFirmAccess({ write: true }), requireAssignedMatter({ clientParam: 'clientId' }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1689,7 +2525,7 @@ firmsRouter.post('/:id/clients/:clientId/invite', requireFirmAccess({ write: tru
   }
 });
 
-firmsRouter.patch('/:id/clients/:clientId/portal-settings', requireFirmAccess({ write: true }), (req, res) => {
+firmsRouter.patch('/:id/clients/:clientId/portal-settings', requireFirmAccess({ write: true }), requireAssignedMatter({ clientParam: 'clientId' }), (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1730,7 +2566,7 @@ firmsRouter.patch('/:id/clients/:clientId/portal-settings', requireFirmAccess({ 
   }
 });
 
-firmsRouter.post('/:id/clients/:clientId/email', requireFirmAccess({ write: true }), async (req, res, next) => {
+firmsRouter.post('/:id/clients/:clientId/email', requireFirmAccess({ write: true }), requireAssignedMatter({ clientParam: 'clientId' }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
 
@@ -1774,7 +2610,7 @@ firmsRouter.post('/:id/clients/:clientId/email', requireFirmAccess({ write: true
   }
 });
 
-firmsRouter.post('/:id/document-requests/:requestId/upload', requireFirmAccess({ write: true }), clientDocumentUpload.single('document'), (req, res) => {
+firmsRouter.post('/:id/document-requests/:requestId/upload', requireFirmAccess({ write: true }), requireAssignedMatter({ requestParam: 'requestId' }), clientDocumentUpload.single('document'), async (req, res) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
   if (!req.file) return res.status(400).json({ error: 'Document file is required' });
@@ -1784,7 +2620,7 @@ firmsRouter.post('/:id/document-requests/:requestId/upload', requireFirmAccess({
     const request = firmDb.prepare('SELECT * FROM client_document_requests WHERE id = ?').get(req.params.requestId);
     if (!request) return res.status(404).json({ error: 'Document request not found' });
 
-    firmDb.prepare(`
+    const uploadResult = firmDb.prepare(`
       INSERT INTO client_uploads
         (request_id, client_id, original_filename, stored_filename, mime_type, file_size)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -1810,6 +2646,8 @@ firmsRouter.post('/:id/document-requests/:requestId/upload', requireFirmAccess({
         WHERE id = ?
       `).run(request.client_id);
     }
+
+    await processUploadedDocumentWithAi({ firmDb, uploadId: uploadResult.lastInsertRowid });
 
     res.status(201).json(getWorkspacePayload(firm, req));
   } finally {

@@ -254,7 +254,7 @@ export default function TemplatesPage() {
         {templates.length > 0 && filteredTemplates.length === 0 && <p className="muted table-empty-text">No templates match the selected filters.</p>}
         {filteredTemplates.length > 0 && (
           <div className="firm-table-wrap template-table-wrap">
-            <table className="firm-table template-table">
+            <table className="firm-table template-table template-records-table">
               <thead>
                 <tr>
                   <th>Template</th>

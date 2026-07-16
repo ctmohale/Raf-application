@@ -24,7 +24,7 @@ export function authenticate(req, res, next) {
     const payload = jwt.verify(token, config.jwtSecret);
     const user = db.prepare('SELECT id, name, email, role, status FROM users WHERE id = ?').get(payload.id);
     if (!user) return res.status(401).json({ error: 'Invalid session' });
-    if (user.status !== 'active' && user.role !== 'admin') return res.status(403).json({ error: 'Account access is not active' });
+    if (user.status !== 'active') return res.status(403).json({ error: 'Account access is not active' });
     req.user = user;
     return next();
   } catch {
@@ -60,7 +60,7 @@ export function authenticateJwtOrApiKey(req, res, next) {
   `).get(keyHash);
 
   if (!record) return res.status(401).json({ error: 'Invalid API key' });
-  if (record.user_status !== 'active' && record.role !== 'admin') return res.status(403).json({ error: 'Account access is not active' });
+  if (record.user_status !== 'active') return res.status(403).json({ error: 'Account access is not active' });
 
   db.prepare('UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?').run(record.id);
   req.user = {

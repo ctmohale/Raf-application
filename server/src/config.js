@@ -28,7 +28,9 @@ export const config = {
   powerMailBaseUrl: process.env.POWERMAIL_BASE_URL || 'https://powermail.beestack.co.za/api',
   powerMailApiKey: process.env.POWERMAIL_API_KEY || '',
   powerMailFromEmail: process.env.POWERMAIL_FROM_EMAIL || '',
-  powerMailTemplateKey: process.env.POWERMAIL_TEMPLATE_KEY || ''
+  powerMailTemplateKey: process.env.POWERMAIL_TEMPLATE_KEY || '',
+  openAiApiKey: process.env.OPENAI_API_KEY || '',
+  aiExtractionModel: process.env.AI_EXTRACTION_MODEL || 'gpt-5-nano'
 };
 
 for (const dir of [dataDir, firmsDir, uploadsDir, originalsDir, generatedDir, spreadsheetsDir, clientUploadsDir]) {

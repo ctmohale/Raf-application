@@ -10,13 +10,25 @@ function getUserFirmAccess(userId) {
     SELECT
       user_firm_access.firm_id,
       user_firm_access.access_level,
+      user_firm_access.firm_role,
+      user_firm_access.phone,
+      user_firm_access.job_title,
+      user_firm_access.can_submit_claims,
       firms.name AS firm_name,
       firms.slug AS firm_slug
     FROM user_firm_access
     JOIN firms ON firms.id = user_firm_access.firm_id
     WHERE user_firm_access.user_id = ?
     ORDER BY firms.name COLLATE NOCASE
-  `).all(userId);
+  `).all(userId).map((access) => ({
+    ...access,
+    can_submit_claims: Boolean(access.can_submit_claims)
+  }));
+}
+
+function getUserTheme(userId) {
+  const setting = db.prepare("SELECT value FROM user_settings WHERE user_id = ? AND key = 'theme'").get(userId);
+  return setting?.value === 'dark' ? 'dark' : 'light';
 }
 
 function serializeAuthUser(row) {
@@ -26,6 +38,7 @@ function serializeAuthUser(row) {
     email: row.email,
     role: row.role,
     status: row.status,
+    theme: getUserTheme(row.id),
     firm_access: getUserFirmAccess(row.id)
   };
 }
@@ -71,11 +84,10 @@ authRouter.post('/login', (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
-  const isAdmin = row.role === 'admin';
-  if (!isAdmin && row.status === 'pending') {
+  if (row.status === 'pending') {
     return res.status(403).json({ error: 'Your account is waiting for admin approval' });
   }
-  if (!isAdmin && row.status === 'suspended') {
+  if (row.status === 'suspended') {
     return res.status(403).json({ error: 'Your account has been suspended by an administrator' });
   }
 

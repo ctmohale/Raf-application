@@ -70,14 +70,18 @@ export default function SettingsPage({ section = 'workspace' }) {
   }
 
   function updateUserDraft(userId, field, value) {
-    setDraftAccess((current) => ({
-      ...current,
-      [userId]: {
-        role: current[userId]?.role || 'staff',
-        status: current[userId]?.status || 'pending',
-        [field]: value
-      }
-    }));
+    setDraftAccess((current) => {
+      const currentDraft = current[userId] || {
+        role: 'staff',
+        status: 'pending',
+        firm_id: '',
+        firm_access_level: 'staff'
+      };
+      const nextDraft = { ...currentDraft, [field]: value };
+      if (field === 'role' && value === 'viewer') nextDraft.firm_access_level = 'viewer';
+      if (field === 'role' && value === 'admin') nextDraft.firm_id = '';
+      return { ...current, [userId]: nextDraft };
+    });
   }
 
   async function saveUserAccess(userRow, override = {}) {
@@ -161,6 +165,7 @@ export default function SettingsPage({ section = 'workspace' }) {
                   || draft.firm_access_level !== (currentFirmAccess?.access_level || 'staff');
                 const quickApprove = row.status === 'pending' && draft.status === 'pending';
                 const firmAccessDisabled = isSelf || draft.role === 'admin';
+                const firmLevelDisabled = firmAccessDisabled || draft.role === 'viewer' || !draft.firm_id;
                 return (
                   <div className="user-access-row" key={row.id}>
                     <div className="user-access-identity">
@@ -183,23 +188,34 @@ export default function SettingsPage({ section = 'workspace' }) {
                     <label>
                       Firm
                       <select value={draft.firm_id} onChange={(event) => updateUserDraft(row.id, 'firm_id', event.target.value)} disabled={firmAccessDisabled}>
-                        <option value="">No firm assigned</option>
+                        <option value="">{draft.role === 'admin' ? 'All law firms (admin)' : 'No firm assigned'}</option>
                         {firms.map((firm) => <option value={firm.id} key={firm.id}>{firm.name}</option>)}
                       </select>
                     </label>
                     <label>
                       Firm access
-                      <select value={draft.firm_access_level} onChange={(event) => updateUserDraft(row.id, 'firm_access_level', event.target.value)} disabled={firmAccessDisabled || !draft.firm_id}>
-                        {firmAccessLevels.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
-                      </select>
+                      {draft.role === 'admin' ? (
+                        <input value="Full admin access" readOnly disabled />
+                      ) : (
+                        <select value={draft.firm_access_level} onChange={(event) => updateUserDraft(row.id, 'firm_access_level', event.target.value)} disabled={firmLevelDisabled}>
+                          {firmAccessLevels.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                        </select>
+                      )}
                     </label>
                     <button
                       className={quickApprove ? 'primary-button' : 'secondary-button'}
                       type="button"
                       disabled={isSelf || savingUserId === row.id || (!isDirty && !quickApprove)}
+                      title={isSelf ? 'Another active admin must change your account access' : undefined}
                       onClick={() => saveUserAccess(row, quickApprove ? { status: 'active' } : {})}
                     >
-                      {savingUserId === row.id ? <ButtonSpinner label="Saving..." /> : quickApprove ? 'Approve' : 'Save'}
+                      {savingUserId === row.id
+                        ? <ButtonSpinner label="Saving..." />
+                        : isSelf
+                          ? 'Protected'
+                          : quickApprove
+                            ? 'Approve'
+                            : 'Save'}
                     </button>
                   </div>
                 );

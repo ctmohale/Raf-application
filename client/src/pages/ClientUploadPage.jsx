@@ -444,7 +444,10 @@ export default function ClientUploadPage() {
                         <div className="client-request-title-row">
                           <h3>{request.label}</h3>
                         </div>
-                        <p>{request.original_filename ? `Uploaded: ${request.original_filename}` : 'PDF, image, or Word file.'}</p>
+                        {request.instructions && <p className="client-request-guidance">{request.instructions}</p>}
+                        <p>{request.original_filename ? `${request.upload_count || 1} file(s) received · Latest: ${request.original_filename}` : 'PDF, image, or Word file. Upload additional files one at a time.'}</p>
+                        {request.ai_status === 'completed' && <p>AI extraction complete. The claim record and attached forms were updated from verified fields.</p>}
+                        {request.ai_status === 'failed' && <p>The file was received, but AI extraction needs staff review.</p>}
                         <div className="client-selected-file-row">
                           <div className={`client-selected-file ${files[request.id] ? 'ready' : ''}`} title={files[request.id]?.name || 'No file selected yet'}>
                             {files[request.id] ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />}
@@ -474,7 +477,7 @@ export default function ClientUploadPage() {
                         />
                         <button className={`primary-button ${files[request.id] ? 'success-button' : ''}`} type="button" disabled={uploadingId === request.id || !files[request.id]} onClick={() => uploadDocument(request.id)}>
                           <UploadCloud size={17} />
-                          {uploadingId === request.id ? <ButtonSpinner label="Uploading..." /> : request.status === 'uploaded' ? 'Replace' : 'Upload'}
+                          {uploadingId === request.id ? <ButtonSpinner label="Uploading..." /> : request.status === 'uploaded' ? 'Upload another' : 'Upload'}
                         </button>
                       </div>
                     </article>

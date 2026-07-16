@@ -312,6 +312,52 @@ templatesRouter.put('/:id/fields/:fieldId', authenticate, (req, res) => {
   return res.json({ field: serializeField(row) });
 });
 
+templatesRouter.delete('/:id/sections', authenticate, (req, res) => {
+  const template = getTemplateOr404(req, res);
+  if (!template) return;
+
+  const title = String(req.body?.title || '').trim();
+  if (!title) return res.status(400).json({ error: 'Section title is required' });
+
+  const rows = db.prepare(`
+    SELECT id, options_json
+    FROM template_fields
+    WHERE template_id = ?
+  `).all(template.id);
+  const updates = rows.flatMap((row) => {
+    let options = [];
+    try {
+      options = row.options_json ? JSON.parse(row.options_json) : [];
+    } catch {
+      options = [];
+    }
+    if (!Array.isArray(options)) options = [];
+    const nextOptions = options.filter((option) => !(
+      option?.kind === 'section-title' && String(option.value || '').trim() === title
+    ));
+    return nextOptions.length === options.length ? [] : [{ id: row.id, options: nextOptions }];
+  });
+
+  const removeSection = db.transaction((fieldUpdates) => {
+    const updateField = db.prepare(`
+      UPDATE template_fields
+      SET options_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND template_id = ?
+    `);
+    fieldUpdates.forEach((field) => {
+      updateField.run(JSON.stringify(field.options), field.id, template.id);
+    });
+    db.prepare(`
+      UPDATE document_templates
+      SET updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(template.id);
+  });
+  removeSection(updates);
+
+  return res.json({ removedFields: updates.length });
+});
+
 templatesRouter.delete('/:id/fields/:fieldId', authenticate, (req, res) => {
   const template = getTemplateOr404(req, res);
   if (!template) return;

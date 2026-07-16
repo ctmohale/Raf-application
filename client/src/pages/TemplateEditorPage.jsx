@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CheckSquare, Combine, Highlighter, Save, Search, Trash2, Ungroup } from 'lucide-react';
+import { CheckSquare, Combine, Heading2, Highlighter, Save, Search, Trash2, Ungroup, X } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
@@ -124,7 +124,9 @@ export default function TemplateEditorPage() {
   const [saving, setSaving] = useState(false);
   const [groupSelectionIds, setGroupSelectionIds] = useState([]);
   const [fieldSearch, setFieldSearch] = useState('');
-  const [sectionDraft, setSectionDraft] = useState('');
+  const [removingSectionTitle, setRemovingSectionTitle] = useState('');
+  const [assignSectionTitle, setAssignSectionTitle] = useState('');
+  const [assigningSection, setAssigningSection] = useState(false);
 
   useEffect(() => {
     apiRequest(`/api/templates/${id}`)
@@ -152,12 +154,18 @@ export default function TemplateEditorPage() {
       field.label,
       field.name,
       field.field_type,
+      getFieldSectionTitle(field),
       `page ${field.page_number}`
     ].filter(Boolean).join(' ').toLowerCase().includes(searchValue));
   }, [fields, fieldSearch]);
   const sectionTitles = useMemo(() => (
     Array.from(new Set(fields.map(getFieldSectionTitle).filter(Boolean))).sort((a, b) => a.localeCompare(b))
   ), [fields]);
+  const sectionSummary = useMemo(() => sectionTitles.map((title) => ({
+    title,
+    color: sectionColor(title),
+    count: fields.filter((field) => getFieldSectionTitle(field) === title).length
+  })), [fields, sectionTitles]);
   const workspaceFields = useMemo(() => fields.map((field) => {
     const sectionTitle = getFieldSectionTitle(field);
     if (!sectionTitle) return field;
@@ -199,20 +207,89 @@ export default function TemplateEditorPage() {
     setError('');
   }
 
-  function applySectionToCheckedFields(sectionTitle) {
-    if (groupSelectionIds.length === 0) {
-      setError('Check fields first, then apply a section title.');
+  function markSectionFromPdf({ title, page_number: pageNumber, y, next_section_y: nextSectionY }) {
+    const cleanTitle = String(title || '').trim();
+    if (!cleanTitle) return;
+
+    const matchingIds = fields
+      .filter((field) => (
+        Number(field.page_number) === Number(pageNumber)
+        && Number(field.y) > Number(y)
+        && (nextSectionY == null || Number(field.y) < Number(nextSectionY))
+      ))
+      .map((field) => field.id);
+
+    if (matchingIds.length === 0) {
+      setError(`No fields were found below “${cleanTitle}”. Add the fields first, then click the heading again.`);
+      setStatus('');
       return;
     }
-    const selectedIds = new Set(groupSelectionIds);
+
+    const matchingIdSet = new Set(matchingIds);
     setFields((current) => current.map((field) => (
-      selectedIds.has(field.id)
-        ? { ...field, options: setFieldSectionTitle(field, sectionTitle) }
+      matchingIdSet.has(field.id)
+        ? { ...field, options: setFieldSectionTitle(field, cleanTitle) }
         : field
     )));
-    setSectionDraft('');
-    setStatus(`Applied section to ${selectedIds.size} checked field${selectedIds.size === 1 ? '' : 's'}.`);
+    setMode('select');
+    setStatus(`Created “${cleanTitle}” with ${matchingIds.length} field${matchingIds.length === 1 ? '' : 's'}. Click Save fields to keep it.`);
     setError('');
+  }
+
+  async function removeSectionTitle(sectionTitle) {
+    const affectedCount = fields.filter((field) => getFieldSectionTitle(field) === sectionTitle).length;
+    setRemovingSectionTitle(sectionTitle);
+    setStatus('');
+    setError('');
+    try {
+      await apiRequest(`/api/templates/${id}/sections`, {
+        method: 'DELETE',
+        body: { title: sectionTitle }
+      });
+      setFields((current) => current.map((field) => (
+        getFieldSectionTitle(field) === sectionTitle
+          ? { ...field, options: setFieldSectionTitle(field, '') }
+          : field
+      )));
+      setStatus(`Removed “${sectionTitle}” from ${affectedCount} field${affectedCount === 1 ? '' : 's'} and saved it.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRemovingSectionTitle('');
+    }
+  }
+
+  async function assignCheckedFieldsToSection() {
+    const title = assignSectionTitle.trim();
+    if (!title || groupSelectionIds.length === 0) {
+      setError('Check one or more inputs and choose a section title.');
+      return;
+    }
+
+    const selectedIds = new Set(groupSelectionIds);
+    const nextFields = fields.map((field) => (
+      selectedIds.has(field.id)
+        ? { ...field, options: setFieldSectionTitle(field, title) }
+        : field
+    ));
+    setAssigningSection(true);
+    setStatus('');
+    setError('');
+    try {
+      const result = await apiRequest(`/api/templates/${id}/fields`, {
+        method: 'POST',
+        body: { fields: nextFields }
+      });
+      setFields(result.fields);
+      setSelectedFieldId(result.fields[0]?.id || null);
+      setGroupSelectionIds([]);
+      setAssignSectionTitle('');
+      setStatus(`Assigned ${selectedIds.size} input${selectedIds.size === 1 ? '' : 's'} to “${title}” and saved it.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAssigningSection(false);
+    }
   }
 
   function toggleGroupSelection(fieldId) {
@@ -378,6 +455,7 @@ export default function TemplateEditorPage() {
               <button className={mode === 'add' ? 'active' : ''} onClick={() => setMode('add')}>Add field</button>
               <button className={mode === 'checkbox' ? 'active' : ''} onClick={() => setMode('checkbox')}><CheckSquare size={15} /> Checkbox</button>
               <button className={mode === 'text' ? 'active' : ''} onClick={() => setMode('text')}><Highlighter size={15} /> Text field</button>
+              <button className={mode === 'section' ? 'active' : ''} onClick={() => setMode('section')}><Heading2 size={15} /> Section title</button>
             </div>
             <button className="primary-button" onClick={saveFields} disabled={saving}>
               {saving ? <ButtonSpinner label="Saving..." /> : <><Save size={16} /> Save fields</>}
@@ -386,6 +464,30 @@ export default function TemplateEditorPage() {
         </div>
         <StatusMessage type="success">{status}</StatusMessage>
         <StatusMessage type="error">{error}</StatusMessage>
+        {sectionSummary.length > 0 && (
+          <div className="template-section-legend" aria-label="Sections on template">
+            <strong>Sections on template</strong>
+            <div>
+              {sectionSummary.map((section) => (
+                <span className="template-section-legend-item" key={section.title}>
+                  <i style={{ background: section.color }} />
+                  <span>{section.title}</span>
+                  <small>{section.count}</small>
+                  <button
+                    type="button"
+                    onClick={() => removeSectionTitle(section.title)}
+                    disabled={Boolean(removingSectionTitle)}
+                    aria-busy={removingSectionTitle === section.title}
+                    title={`Remove section “${section.title}”`}
+                    aria-label={`Remove section ${section.title}`}
+                  >
+                    <X size={13} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         <PdfWorkspace
           pdfPath={`/api/templates/${id}/pdf`}
           fields={workspaceFields}
@@ -394,6 +496,7 @@ export default function TemplateEditorPage() {
           onSelectField={setSelectedField}
           multiSelectedFieldIds={groupSelectionIds}
           onToggleMultiSelect={toggleGroupSelection}
+          onPickSectionTitle={markSectionFromPdf}
           mode={mode}
         />
       </div>
@@ -425,29 +528,32 @@ export default function TemplateEditorPage() {
           <small>{groupSelection.length} selected</small>
         </div>
         <div className="section-assign-control">
-          <label htmlFor="bulk-section-title">Section title for checked</label>
+          <label htmlFor="checked-section-title">Put checked inputs in a section</label>
           <div className="section-assign-row">
-            <input
-              id="bulk-section-title"
-              list="template-section-titles"
-              placeholder="e.g. Accident and Treatment"
-              value={sectionDraft}
-              onChange={(event) => setSectionDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  applySectionToCheckedFields(sectionDraft);
-                }
-              }}
-            />
+            <select
+              id="checked-section-title"
+              value={assignSectionTitle}
+              onChange={(event) => setAssignSectionTitle(event.target.value)}
+            >
+              <option value="">Choose a section title</option>
+              {sectionTitles.map((title) => <option value={title} key={title}>{title}</option>)}
+            </select>
             <button
               className="secondary-button compact-button"
               type="button"
-              onClick={() => applySectionToCheckedFields(sectionDraft)}
-              disabled={groupSelection.length === 0}
+              onClick={assignCheckedFieldsToSection}
+              disabled={groupSelection.length === 0 || !assignSectionTitle || assigningSection}
             >
-              Apply
+              {assigningSection ? 'Saving…' : 'Assign'}
             </button>
+          </div>
+          <small>Check every input that should appear below the selected title.</small>
+        </div>
+        <div className="section-pick-help">
+          <Heading2 size={18} />
+          <div>
+            <strong>Make a section</strong>
+            <span>Choose Section title above, then click a heading on the PDF.</span>
           </div>
         </div>
         <datalist id="template-section-titles">
@@ -464,7 +570,7 @@ export default function TemplateEditorPage() {
                   type="checkbox"
                   checked={groupSelectionIds.includes(field.id)}
                   onChange={() => toggleGroupSelection(field.id)}
-                  aria-label={`Select ${field.label} for grouping`}
+                  aria-label={`Select ${field.label} for bulk actions`}
                 />
               </label>
               <button

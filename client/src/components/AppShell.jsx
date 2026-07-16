@@ -15,6 +15,7 @@ import {
   Settings,
   ShieldCheck,
   Stethoscope,
+  Sun,
   Users,
   X,
 } from 'lucide-react';
@@ -25,7 +26,7 @@ import { apiRequest } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 
 export default function AppShell({ children }) {
-  const { user, logout } = useAuth();
+  const { user, logout, updateUser } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [firmName, setFirmName] = useState('');
@@ -40,6 +41,8 @@ export default function AppShell({ children }) {
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
   const [notificationError, setNotificationError] = useState('');
+  const [theme, setTheme] = useState(() => (user?.theme === 'dark' ? 'dark' : 'light'));
+  const [themeSaving, setThemeSaving] = useState(false);
   const slugFirmMatch = useMatch('/firm/:firmId/*');
   const legacyFirmMatch = useMatch('/firms/:firmId/*');
   const firmMatch = slugFirmMatch || legacyFirmMatch;
@@ -71,8 +74,8 @@ export default function AppShell({ children }) {
     String(row.firm.id) === String(activeFirmKey) || row.firm.slug === activeFirmKey
   ));
   const notificationCount = isFirmWorkspace
-    ? Number(activeOverview?.unread_firm || 0) + Number(activeOverview?.reminders_due || 0)
-    : Number(messageOverview?.totals?.unread_admin || 0) + Number(messageOverview?.totals?.reminders_due || 0);
+    ? Number(activeOverview?.unread_firm || 0)
+    : overviewRows.reduce((total, row) => total + Number(row.unread_admin || 0), 0);
   const chatTitle = isFirmWorkspace ? 'Admin chat' : activeOverview?.firm?.name || 'Firm messages';
   const chatSubtitle = isFirmWorkspace
     ? workspaceLabel
@@ -91,6 +94,46 @@ export default function AppShell({ children }) {
 
   function isOutgoingMessage(message) {
     return isFirmWorkspace ? message.sender_type === 'firm' : message.sender_type === 'admin';
+  }
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    let ignore = false;
+    apiRequest('/api/users/me/settings')
+      .then((result) => {
+        if (ignore) return;
+        const savedTheme = result.settings?.theme === 'dark' ? 'dark' : 'light';
+        setTheme(savedTheme);
+        updateUser({ theme: savedTheme });
+      })
+      .catch(() => {});
+    return () => {
+      ignore = true;
+    };
+  }, [user?.id]);
+
+  async function toggleTheme() {
+    if (themeSaving) return;
+    const previousTheme = theme;
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
+    setThemeSaving(true);
+    try {
+      const result = await apiRequest('/api/users/me/settings', {
+        method: 'PATCH',
+        body: { theme: nextTheme }
+      });
+      const savedTheme = result.settings?.theme === 'dark' ? 'dark' : 'light';
+      setTheme(savedTheme);
+      updateUser({ theme: savedTheme });
+    } catch {
+      setTheme(previousTheme);
+    } finally {
+      setThemeSaving(false);
+    }
   }
 
   useEffect(() => {
@@ -119,17 +162,13 @@ export default function AppShell({ children }) {
 
   useEffect(() => {
     if (!notificationsOpen || !canUseFirmMessages) return;
-    if (user?.role === 'admin') {
-      loadMessageOverview().catch((err) => setNotificationError(err.message));
-    } else if (isFirmWorkspace && firmId) {
-      loadMessageThread(firmId, 'firm').catch((err) => setNotificationError(err.message));
-    }
+    loadMessageOverview().catch((err) => setNotificationError(err.message));
   }, [notificationsOpen, firmId, canUseFirmMessages, user?.role, isFirmWorkspace]);
 
   useEffect(() => {
-    if (user?.role !== 'admin') return;
+    if (!canUseFirmMessages) return;
     loadMessageOverview().catch(() => {});
-  }, [firmId, isFirmWorkspace, user?.role]);
+  }, [firmId, isFirmWorkspace, user?.role, canUseFirmMessages]);
 
   useEffect(() => {
     setMobileNavOpen(false);
@@ -144,6 +183,10 @@ export default function AppShell({ children }) {
     if (!notificationsOpen || !activeFirmKey || !canUseFirmMessages) return;
     loadMessageThread(activeFirmKey, isFirmWorkspace ? 'firm' : 'admin').catch((err) => setNotificationError(err.message));
   }, [notificationsOpen, activeFirmKey, isFirmWorkspace, canUseFirmMessages]);
+
+  useEffect(() => {
+    setMessageThread(null);
+  }, [activeFirmKey]);
 
   async function loadMessageOverview() {
     setNotificationError('');
@@ -174,6 +217,27 @@ export default function AppShell({ children }) {
         body: { reader_type: readerType }
       });
       setMessageThread(result);
+      setMessageOverview((current) => {
+        if (!current?.rows) return current;
+        const rows = current.rows.map((row) => (
+          Number(row.firm.id) === Number(result.firm.id)
+            ? {
+                ...row,
+                unread_admin: readerType === 'admin' ? 0 : row.unread_admin,
+                unread_firm: readerType === 'firm' ? 0 : row.unread_firm
+              }
+            : row
+        ));
+        return {
+          ...current,
+          rows,
+          totals: rows.reduce((totals, row) => ({
+            unread_admin: totals.unread_admin + Number(row.unread_admin || 0),
+            unread_firm: totals.unread_firm + Number(row.unread_firm || 0),
+            reminders_due: totals.reminders_due + Number(row.reminders_due || 0)
+          }), { unread_admin: 0, unread_firm: 0, reminders_due: 0 })
+        };
+      });
       return result;
     } finally {
       setNotificationsLoading(false);
@@ -251,6 +315,8 @@ export default function AppShell({ children }) {
               <>
                 <NavLink to={`${firmBasePath}/workspace`}><Home size={18} /> Dashboard</NavLink>
                 <NavLink to={`${firmBasePath}/clients`}><Users size={18} /> Clients</NavLink>
+                <NavLink to={`${firmBasePath}/team`}><Users size={18} /> Team Members</NavLink>
+                <NavLink to={`${firmBasePath}/my-matters`}><BriefcaseBusiness size={18} /> My Matters</NavLink>
                 <NavLink to={`${firmBasePath}/doctors`}><Stethoscope size={18} /> Doctors</NavLink>
                 <NavLink to={`${firmBasePath}/claims`}><BriefcaseBusiness size={18} /> Claims</NavLink>
                 <NavLink to={`${firmBasePath}/billing`}><Banknote size={18} /> Billing</NavLink>
@@ -399,8 +465,16 @@ export default function AppShell({ children }) {
 	                )}
 	              </section>
 	            )}
-	            <button className="icon-button theme-toggle active" type="button" title="Theme" aria-label="Theme">
-              <Moon size={18} />
+	            <button
+              className={`icon-button theme-toggle ${theme === 'dark' ? 'active' : ''}`}
+              type="button"
+              title={theme === 'dark' ? 'Use light mode' : 'Use dark mode'}
+              aria-label={theme === 'dark' ? 'Use light mode' : 'Use dark mode'}
+              aria-pressed={theme === 'dark'}
+              onClick={toggleTheme}
+              disabled={themeSaving}
+            >
+              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
             </button>
             <div className="profile-pill">
               <div className="avatar" aria-hidden="true">{user?.name?.charAt(0) || 'S'}</div>

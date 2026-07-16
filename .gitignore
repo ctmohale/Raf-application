@@ -4,6 +4,7 @@ server/data
 server/uploads/originals/*
 server/uploads/generated/*
 server/uploads/spreadsheets/*
+server/uploads/client-documents/*
 !server/uploads/originals/.gitkeep
 !server/uploads/generated/.gitkeep
 !server/uploads/spreadsheets/.gitkeep

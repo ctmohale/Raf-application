@@ -7,19 +7,27 @@ export const usersRouter = express.Router();
 const allowedRoles = new Set(['admin', 'staff', 'viewer']);
 const allowedStatuses = new Set(['pending', 'active', 'suspended']);
 const allowedFirmAccessLevels = new Set(['staff', 'viewer']);
+const allowedThemes = new Set(['light', 'dark']);
 
 function serializeUser(row) {
   const firmAccess = db.prepare(`
     SELECT
       user_firm_access.firm_id,
       user_firm_access.access_level,
+      user_firm_access.firm_role,
+      user_firm_access.phone,
+      user_firm_access.job_title,
+      user_firm_access.can_submit_claims,
       firms.name AS firm_name,
       firms.slug AS firm_slug
     FROM user_firm_access
     JOIN firms ON firms.id = user_firm_access.firm_id
     WHERE user_firm_access.user_id = ?
     ORDER BY firms.name COLLATE NOCASE
-  `).all(row.id);
+  `).all(row.id).map((access) => ({
+    ...access,
+    can_submit_claims: Boolean(access.can_submit_claims)
+  }));
 
   return {
     id: row.id,
@@ -59,6 +67,26 @@ function activeAdminCount(excludeUserId = null) {
   `).get(params).count;
 }
 
+usersRouter.get('/me/settings', authenticate, (req, res) => {
+  const setting = db.prepare("SELECT value FROM user_settings WHERE user_id = ? AND key = 'theme'").get(req.user.id);
+  return res.json({ settings: { theme: setting?.value === 'dark' ? 'dark' : 'light' } });
+});
+
+usersRouter.patch('/me/settings', authenticate, (req, res) => {
+  const theme = String(req.body?.theme || '').trim();
+  if (!allowedThemes.has(theme)) return res.status(400).json({ error: 'Choose light or dark theme' });
+
+  db.prepare(`
+    INSERT INTO user_settings (user_id, key, value, updated_at)
+    VALUES (?, 'theme', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, key) DO UPDATE SET
+      value = excluded.value,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(req.user.id, theme);
+
+  return res.json({ settings: { theme } });
+});
+
 usersRouter.use(authenticate, requireAdmin);
 
 usersRouter.get('/', (_req, res) => {
@@ -76,10 +104,12 @@ usersRouter.patch('/:id/access', (req, res) => {
 
   const role = String(req.body?.role || target.role).trim();
   const status = String(req.body?.status || target.status).trim();
-  const firmId = req.body?.firm_id ? Number(req.body.firm_id) : null;
+  const hasFirmId = req.body?.firm_id !== null && req.body?.firm_id !== undefined && req.body?.firm_id !== '';
+  const firmId = hasFirmId ? Number(req.body.firm_id) : null;
   const firmAccessLevel = String(req.body?.firm_access_level || 'staff').trim();
   if (!allowedRoles.has(role)) return res.status(400).json({ error: 'Choose a valid access role' });
   if (!allowedStatuses.has(status)) return res.status(400).json({ error: 'Choose a valid account status' });
+  if (hasFirmId && (!Number.isInteger(firmId) || firmId < 1)) return res.status(400).json({ error: 'Choose a valid law firm workspace' });
   if (firmId && !allowedFirmAccessLevels.has(firmAccessLevel)) return res.status(400).json({ error: 'Choose a valid firm access level' });
 
   if (firmId) {
@@ -102,6 +132,7 @@ usersRouter.patch('/:id/access', (req, res) => {
   const approvedBy = status === 'active'
     ? target.approved_by_user_id || req.user.id
     : target.approved_by_user_id;
+  const effectiveFirmAccessLevel = role === 'viewer' ? 'viewer' : firmAccessLevel;
 
   const updateAccess = db.transaction(() => {
     db.prepare(`
@@ -115,7 +146,7 @@ usersRouter.patch('/:id/access', (req, res) => {
       db.prepare(`
         INSERT INTO user_firm_access (user_id, firm_id, access_level)
         VALUES (?, ?, ?)
-      `).run(target.id, firmId, firmAccessLevel);
+      `).run(target.id, firmId, effectiveFirmAccessLevel);
     }
   });
   updateAccess();

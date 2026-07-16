@@ -5,6 +5,7 @@ import { originalsDir, resolveInside } from '../config.js';
 import { clientDocumentUpload } from '../middleware/upload.js';
 import { openFirmDatabase } from '../services/firmDatabases.js';
 import { generateFilledPdf, validateDataAgainstFields } from '../services/pdfFill.js';
+import { processUploadedDocumentWithAi } from '../services/aiDocumentExtraction.js';
 import { getTemplateFields } from '../services/templateAccess.js';
 
 export const clientPortalRouter = express.Router();
@@ -120,12 +121,60 @@ function serializePortal(firm, firmDb, client) {
   const requests = firmDb.prepare(`
     SELECT
       client_document_requests.*,
-      client_uploads.original_filename,
-      client_uploads.uploaded_at
+      COUNT(client_uploads.id) AS upload_count,
+      (
+        SELECT latest_upload.original_filename
+        FROM client_uploads AS latest_upload
+        WHERE latest_upload.request_id = client_document_requests.id
+        ORDER BY latest_upload.id DESC
+        LIMIT 1
+      ) AS original_filename,
+      (
+        SELECT latest_upload.uploaded_at
+        FROM client_uploads AS latest_upload
+        WHERE latest_upload.request_id = client_document_requests.id
+        ORDER BY latest_upload.id DESC
+        LIMIT 1
+      ) AS uploaded_at
+      ,(
+        SELECT latest_upload.ai_status
+        FROM client_uploads AS latest_upload
+        WHERE latest_upload.request_id = client_document_requests.id
+        ORDER BY latest_upload.id DESC
+        LIMIT 1
+      ) AS ai_status
+      ,(
+        SELECT latest_upload.ai_summary
+        FROM client_uploads AS latest_upload
+        WHERE latest_upload.request_id = client_document_requests.id
+        ORDER BY latest_upload.id DESC
+        LIMIT 1
+      ) AS ai_summary
+      ,(
+        SELECT latest_upload.ai_error
+        FROM client_uploads AS latest_upload
+        WHERE latest_upload.request_id = client_document_requests.id
+        ORDER BY latest_upload.id DESC
+        LIMIT 1
+      ) AS ai_error
     FROM client_document_requests
     LEFT JOIN client_uploads ON client_uploads.request_id = client_document_requests.id
     WHERE client_document_requests.client_id = ?
-    ORDER BY client_document_requests.created_at
+    GROUP BY client_document_requests.id
+    ORDER BY
+      client_document_requests.case_id DESC,
+      CASE client_document_requests.document_type
+        WHEN 'claimant_id' THEN 1
+        WHEN 'police_accident_report' THEN 2
+        WHEN 'client_accident_affidavit' THEN 3
+        WHEN 'medical_documents' THEN 4
+        WHEN 'medical_expenses' THEN 5
+        WHEN 'employment_income' THEN 6
+        WHEN 'banking_proof' THEN 7
+        WHEN 'photographs' THEN 8
+        ELSE 99
+      END,
+      client_document_requests.id
   `).all(client.id);
 
   const claimForms = templateViewEnabled ? firmDb.prepare(`
@@ -354,7 +403,7 @@ clientPortalRouter.patch('/:token/forms/:attachmentId', async (req, res, next) =
   }
 });
 
-clientPortalRouter.post('/:token/requests/:requestId/upload', clientDocumentUpload.single('document'), (req, res) => {
+clientPortalRouter.post('/:token/requests/:requestId/upload', clientDocumentUpload.single('document'), async (req, res) => {
   const portal = findClientPortal(req.params.token);
   if (!portal) return res.status(404).json({ error: 'Client portal link is invalid or expired' });
   if (!req.file) {
@@ -371,7 +420,7 @@ clientPortalRouter.post('/:token/requests/:requestId/upload', clientDocumentUplo
 
     if (!request) return res.status(404).json({ error: 'Document request not found' });
 
-    portal.firmDb.prepare(`
+    const uploadResult = portal.firmDb.prepare(`
       INSERT INTO client_uploads
         (request_id, client_id, original_filename, stored_filename, mime_type, file_size)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -397,6 +446,8 @@ clientPortalRouter.post('/:token/requests/:requestId/upload', clientDocumentUplo
         WHERE id = ?
       `).run(portal.client.id);
     }
+
+    await processUploadedDocumentWithAi({ firmDb: portal.firmDb, uploadId: uploadResult.lastInsertRowid });
 
     res.status(201).json(serializePortal(portal.firm, portal.firmDb, portal.client));
   } finally {

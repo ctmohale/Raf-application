@@ -44,14 +44,40 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS user_settings (
+    user_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS user_firm_access (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     firm_id INTEGER NOT NULL,
     access_level TEXT NOT NULL DEFAULT 'staff',
+    firm_role TEXT NOT NULL DEFAULT 'assistant',
+    phone TEXT,
+    job_title TEXT,
+    can_submit_claims INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, firm_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (firm_id) REFERENCES firms(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS firm_user_notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    firm_id INTEGER NOT NULL,
+    case_id INTEGER,
+    notification_type TEXT NOT NULL DEFAULT 'matter_assignment',
+    message TEXT NOT NULL,
+    read_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (firm_id) REFERENCES firms(id) ON DELETE CASCADE
   );
@@ -170,6 +196,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_firms_status ON firms(status);
   CREATE INDEX IF NOT EXISTS idx_user_firm_access_user ON user_firm_access(user_id);
   CREATE INDEX IF NOT EXISTS idx_user_firm_access_firm ON user_firm_access(firm_id);
+  CREATE INDEX IF NOT EXISTS idx_firm_user_notifications_user ON firm_user_notifications(user_id, read_at, created_at);
   CREATE INDEX IF NOT EXISTS idx_fields_template ON template_fields(template_id);
   CREATE INDEX IF NOT EXISTS idx_docs_user ON generated_documents(user_id);
   CREATE INDEX IF NOT EXISTS idx_docs_template ON generated_documents(template_id);
@@ -201,6 +228,15 @@ if (!userColumns.includes('updated_at')) {
 db.prepare("UPDATE users SET role = 'staff' WHERE role = 'client'").run();
 db.prepare("UPDATE users SET status = 'active' WHERE status IS NULL OR status = ''").run();
 db.prepare("UPDATE users SET approved_at = COALESCE(approved_at, created_at), updated_at = COALESCE(updated_at, created_at)").run();
+
+const firmAccessColumns = db.prepare('PRAGMA table_info(user_firm_access)').all().map((column) => column.name);
+const addFirmAccessColumn = (name, definition) => {
+  if (!firmAccessColumns.includes(name)) db.prepare(`ALTER TABLE user_firm_access ADD COLUMN ${name} ${definition}`).run();
+};
+addFirmAccessColumn('firm_role', "TEXT NOT NULL DEFAULT 'assistant'");
+addFirmAccessColumn('phone', 'TEXT');
+addFirmAccessColumn('job_title', 'TEXT');
+addFirmAccessColumn('can_submit_claims', 'INTEGER NOT NULL DEFAULT 0');
 
 export function serializeField(row) {
   if (!row) return null;

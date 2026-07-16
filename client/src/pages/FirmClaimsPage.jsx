@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { BellRing, BriefcaseBusiness, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Mail, Maximize2, MessageCircle, Minimize2, Plus, Search, Send, Share2, Sparkles, Trash2, Type, UploadCloud, X } from 'lucide-react';
+import { BellRing, BriefcaseBusiness, CheckCircle2, CircleDashed, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Mail, Maximize2, MessageCircle, Minimize2, Plus, Search, Send, Share2, Sparkles, Trash2, Type, UploadCloud, UserRoundCheck, X } from 'lucide-react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ButtonSpinner, LoadingSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
@@ -248,7 +248,10 @@ const emptyNewClaimForm = {
   future_medical_expenses: '',
   other_compensation: '',
   auto_reminders_enabled: true,
-  reminder_time: '09:00'
+  reminder_time: '09:00',
+  responsible_lawyer_user_id: '',
+  assigned_assistant_user_id: '',
+  assignment_note: ''
 };
 
 const medicalReportTypes = [
@@ -285,6 +288,8 @@ export default function FirmClaimsPage() {
   const [uploadingRequestId, setUploadingRequestId] = useState(null);
   const [viewingRequestId, setViewingRequestId] = useState(null);
   const [intakeCase, setIntakeCase] = useState(null);
+  const [intakeFiles, setIntakeFiles] = useState({});
+  const intakeFileInputRefs = useRef({});
   const [shareCase, setShareCase] = useState(null);
   const [medicalReportCase, setMedicalReportCase] = useState(null);
   const [medicalAssessmentForm, setMedicalAssessmentForm] = useState(emptyMedicalAssessmentForm);
@@ -300,7 +305,11 @@ export default function FirmClaimsPage() {
   const [documentPreview, setDocumentPreview] = useState(null);
   const [previewingClaimFormId, setPreviewingClaimFormId] = useState(null);
   const [fillingClaimFormId, setFillingClaimFormId] = useState(null);
+  const [refreshingClaimsWithAi, setRefreshingClaimsWithAi] = useState(false);
+  const [aiRefreshModal, setAiRefreshModal] = useState(null);
+  const [aiScanConfirmation, setAiScanConfirmation] = useState(null);
   const [fillingProgress, setFillingProgress] = useState(0);
+  const [aiFillResults, setAiFillResults] = useState({});
   const [editingClaimForm, setEditingClaimForm] = useState(null);
   const [editFormFields, setEditFormFields] = useState([]);
   const [editFormValues, setEditFormValues] = useState({});
@@ -317,6 +326,9 @@ export default function FirmClaimsPage() {
   const [copiedClientId, setCopiedClientId] = useState(null);
   const [copiedMedicalRequestId, setCopiedMedicalRequestId] = useState(null);
   const [savingPortalSettings, setSavingPortalSettings] = useState(false);
+  const [assignmentCase, setAssignmentCase] = useState(null);
+  const [assignmentForm, setAssignmentForm] = useState({ responsible_lawyer_user_id: '', assigned_assistant_user_id: '', assignment_note: '', reason: '' });
+  const [savingAssignment, setSavingAssignment] = useState(false);
 
   useEffect(() => {
     apiRequest(`/api/firms/${id}/workspace`)
@@ -341,6 +353,10 @@ export default function FirmClaimsPage() {
   const medicalAssessmentRequests = workspace?.medicalAssessmentRequests || [];
   const claimForms = workspace?.claimForms || [];
   const clientOptions = workspace?.clients || [];
+  const teamMembers = workspace?.teamMembers || [];
+  const lawyerOptions = teamMembers.filter((member) => member.status === 'active' && ['lawyer', 'firm_admin'].includes(member.firm_role));
+  const assistantOptions = teamMembers.filter((member) => member.status === 'active' && member.firm_role === 'assistant');
+  const canAssignMatters = Boolean(workspace?.permissions?.can_manage_team);
   const firmDoctorOptions = (workspace?.doctors || []).filter((doctor) => doctor.status === 'active');
   const filteredCases = cases.filter((caseRecord) => {
     const searchText = [
@@ -361,6 +377,12 @@ export default function FirmClaimsPage() {
     return groups;
   }, {});
   const intakeRequests = intakeCase ? requestsByCase[intakeCase.id] || [] : [];
+  const intakeUploadedCount = intakeRequests.filter((request) => Number(request.upload_count || 0) > 0).length;
+  const intakeProgress = intakeRequests.length ? Math.round((intakeUploadedCount / intakeRequests.length) * 100) : 0;
+  const aiRefreshDocuments = aiRefreshModal?.documents || [];
+  const aiRefreshChecked = aiRefreshDocuments.filter((document) => ['ready', 'completed', 'failed', 'skipped'].includes(document.run_status)).length;
+  const aiRefreshProgress = aiRefreshDocuments.length ? Math.round((aiRefreshChecked / aiRefreshDocuments.length) * 100) : 0;
+  const aiRefreshBusy = ['loading', 'scanning', 'forms'].includes(aiRefreshModal?.phase);
   const medicalAssessmentsByCase = medicalAssessmentRequests.reduce((groups, request) => {
     const key = request.case_id;
     groups[key] = groups[key] || [];
@@ -706,6 +728,9 @@ export default function FirmClaimsPage() {
       collision_description: newClaimForm.collision_description,
       auto_reminders_enabled: newClaimForm.auto_reminders_enabled,
       reminder_time: newClaimForm.reminder_time,
+      responsible_lawyer_user_id: newClaimForm.responsible_lawyer_user_id || null,
+      assigned_assistant_user_id: newClaimForm.assigned_assistant_user_id || null,
+      assignment_note: newClaimForm.assignment_note,
       banking: {
         bank_name: newClaimForm.bank_name,
         account_holder: newClaimForm.account_holder,
@@ -766,6 +791,42 @@ export default function FirmClaimsPage() {
       setError(err.message);
     } finally {
       setCreatingClaim(false);
+    }
+  }
+
+  function openAssignmentModal(caseRecord) {
+    setAssignmentCase(caseRecord);
+    setAssignmentForm({
+      responsible_lawyer_user_id: caseRecord.responsible_lawyer_user_id ? String(caseRecord.responsible_lawyer_user_id) : '',
+      assigned_assistant_user_id: caseRecord.assigned_assistant_user_id ? String(caseRecord.assigned_assistant_user_id) : '',
+      assignment_note: '',
+      reason: ''
+    });
+  }
+
+  function closeAssignmentModal() {
+    setAssignmentCase(null);
+    setAssignmentForm({ responsible_lawyer_user_id: '', assigned_assistant_user_id: '', assignment_note: '', reason: '' });
+  }
+
+  async function saveMatterAssignment(event) {
+    event.preventDefault();
+    if (!assignmentCase) return;
+    setSavingAssignment(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await apiRequest(`/api/firms/${id}/claims/${assignmentCase.id}/assignment`, {
+        method: 'PATCH',
+        body: assignmentForm
+      });
+      setWorkspace(result.workspace);
+      setMessage(`${assignmentCase.case_reference} assigned and saved to matter history.`);
+      closeAssignmentModal();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingAssignment(false);
     }
   }
 
@@ -880,6 +941,12 @@ export default function FirmClaimsPage() {
         body: formData
       });
       setWorkspace(result);
+      setIntakeFiles((current) => {
+        const next = { ...current };
+        delete next[request.id];
+        return next;
+      });
+      if (intakeFileInputRefs.current[request.id]) intakeFileInputRefs.current[request.id].value = '';
       setMessage(`${request.label} uploaded for ${request.first_name} ${request.surname}.`);
     } catch (err) {
       setError(err.message);
@@ -986,6 +1053,7 @@ export default function FirmClaimsPage() {
     const progressTimer = window.setInterval(() => {
       setFillingProgress((current) => Math.min(current + 14, 92));
     }, 420);
+    const beforeStatus = getClaimFormInputStatus(form);
 
     try {
       const result = await apiRequest(`/api/firms/${id}/claims/${caseRecord.id}/forms/${form.id}/fill-ai`, {
@@ -997,7 +1065,19 @@ export default function FirmClaimsPage() {
       if (claimFormsCase?.id === caseRecord.id) {
         setClaimFormsPayload((current) => current ? { ...current, attached_forms: result.attached_forms } : current);
       }
-      setMessage(`${form.template?.name || 'Template form'} filled with AI data for ${caseRecord.first_name} ${caseRecord.surname}.`);
+      const inputStatus = result.input_status;
+      if (inputStatus) {
+        setAiFillResults((current) => ({
+          ...current,
+          [form.id]: {
+            ...inputStatus,
+            added: Math.max(0, inputStatus.filled - beforeStatus.filled),
+            documentsUsed: Number(result.ai_profile_document_count || 0),
+            completedAt: new Date().toLocaleTimeString()
+          }
+        }));
+      }
+      setMessage(`${form.template?.name || 'Template form'} filled with AI data for ${caseRecord.first_name} ${caseRecord.surname}${inputStatus ? ` · ${inputStatus.filled}/${inputStatus.total} inputs filled (${inputStatus.percentage}%)` : ''}.`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1006,6 +1086,92 @@ export default function FirmClaimsPage() {
         setFillingClaimFormId(null);
         setFillingProgress(0);
       }, 350);
+    }
+  }
+
+  function requestAiScan(caseRecord = null) {
+    setAiScanConfirmation({ caseRecord: caseRecord?.id ? caseRecord : null });
+  }
+
+  function confirmAiScan() {
+    const caseRecord = aiScanConfirmation?.caseRecord || null;
+    setAiScanConfirmation(null);
+    refreshClaimsWithAi(caseRecord);
+  }
+
+  async function refreshClaimsWithAi(caseRecord = null) {
+    const scopedClaim = caseRecord?.id ? {
+      id: caseRecord.id,
+      clientName: `${caseRecord.first_name} ${caseRecord.surname}`,
+      caseReference: caseRecord.case_reference
+    } : null;
+    setError('');
+    setMessage('');
+    setRefreshingClaimsWithAi(true);
+    setAiRefreshModal({ phase: 'loading', model: '', documents: [], summary: null, error: '', scope: scopedClaim });
+
+    try {
+      const planUrl = scopedClaim
+        ? `/api/firms/${id}/claims/refresh-ai/plan?case_id=${encodeURIComponent(scopedClaim.id)}`
+        : `/api/firms/${id}/claims/refresh-ai/plan`;
+      const plan = await apiRequest(planUrl);
+      let documents = (plan.documents || []).map((document) => ({
+        ...document,
+        run_status: 'queued',
+        run_error: ''
+      }));
+      let formsUpdatedDuringScan = 0;
+      const updateDocument = (uploadId, patch) => {
+        documents = documents.map((document) => Number(document.upload_id) === Number(uploadId) ? { ...document, ...patch } : document);
+        setAiRefreshModal((current) => current ? { ...current, phase: 'scanning', documents } : current);
+      };
+
+      setAiRefreshModal((current) => current ? { ...current, phase: 'scanning', model: plan.model, documents } : current);
+      for (const document of documents.filter((item) => item.run_status === 'queued')) {
+        updateDocument(document.upload_id, { run_status: 'processing' });
+        try {
+          const scan = await apiRequest(`/api/firms/${id}/claims/refresh-ai/uploads/${document.upload_id}`, { method: 'POST' });
+          formsUpdatedDuringScan += Number(scan.filled_templates || 0);
+          updateDocument(document.upload_id, {
+            run_status: scan.status === 'completed' ? 'completed' : scan.status === 'skipped' ? 'skipped' : 'failed',
+            ai_model: scan.model || plan.model,
+            run_error: scan.error || ''
+          });
+        } catch (scanError) {
+          updateDocument(document.upload_id, { run_status: 'failed', run_error: scanError.message });
+        }
+      }
+
+      setAiRefreshModal((current) => current ? { ...current, phase: 'forms', documents } : current);
+      const result = await apiRequest(`/api/firms/${id}/claims/refresh-ai`, {
+        method: 'POST',
+        body: { skip_uploads: true, case_id: scopedClaim?.id || null }
+      });
+      const summary = {
+        ...result,
+        documents_checked: documents.length,
+        uploads_extracted: documents.filter((document) => document.run_status === 'completed').length,
+        uploads_failed: documents.filter((document) => ['failed', 'skipped'].includes(document.run_status)).length,
+        forms_updated: Number(result.forms_updated || 0) + formsUpdatedDuringScan
+      };
+      setWorkspace(result.workspace);
+      setAiRefreshModal((current) => current ? { ...current, phase: 'complete', documents, summary } : current);
+      setMessage(
+        `${scopedClaim ? `${scopedClaim.clientName}: ` : ''}AI checked ${summary.claims_checked} claim${summary.claims_checked === 1 ? '' : 's'} and `
+        + `${summary.documents_checked} uploaded document${summary.documents_checked === 1 ? '' : 's'}. `
+        + `${summary.uploads_extracted} scanned successfully, `
+        + `updated ${summary.forms_updated} form${summary.forms_updated === 1 ? '' : 's'} `
+        + `and checked ${summary.fields_checked} empty input${summary.fields_checked === 1 ? '' : 's'}; `
+        + `${summary.inputs_added} could be filled.`
+        + (Number(summary.uploads_failed || 0) + Number(summary.forms_failed || 0) > 0
+          ? ` ${Number(summary.uploads_failed || 0) + Number(summary.forms_failed || 0)} item(s) need staff review.`
+          : '')
+      );
+    } catch (err) {
+      setError(err.message);
+      setAiRefreshModal((current) => current ? { ...current, phase: 'failed', error: err.message } : current);
+    } finally {
+      setRefreshingClaimsWithAi(false);
     }
   }
 
@@ -1040,6 +1206,7 @@ export default function FirmClaimsPage() {
     const progressTimer = window.setInterval(() => {
       setFillingProgress((current) => Math.min(current + 14, 92));
     }, 420);
+    const beforeStatus = getClaimFormInputStatus(form);
 
     try {
       const result = await apiRequest(`/api/firms/${id}/claims/${caseRecord.id}/forms/${form.id}/fill-ai`, {
@@ -1056,7 +1223,19 @@ export default function FirmClaimsPage() {
       const nextForm = updatedForm || { ...form, document: result.document || form.document };
       setEditingClaimForm((current) => current ? { ...current, form: nextForm } : current);
       setEditFormValues(buildEditFormValues(editFormFields, nextForm.document?.input || result.document?.input || {}, caseRecord));
-      setMessage(`${form.template?.name || 'Template form'} filled with AI data for ${caseRecord.first_name} ${caseRecord.surname}.`);
+      const inputStatus = result.input_status;
+      if (inputStatus) {
+        setAiFillResults((current) => ({
+          ...current,
+          [form.id]: {
+            ...inputStatus,
+            added: Math.max(0, inputStatus.filled - beforeStatus.filled),
+            documentsUsed: Number(result.ai_profile_document_count || 0),
+            completedAt: new Date().toLocaleTimeString()
+          }
+        }));
+      }
+      setMessage(`${form.template?.name || 'Template form'} filled with AI data for ${caseRecord.first_name} ${caseRecord.surname}${inputStatus ? ` · ${inputStatus.filled}/${inputStatus.total} inputs filled (${inputStatus.percentage}%)` : ''}.`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1559,6 +1738,16 @@ export default function FirmClaimsPage() {
                 <p>Recent matters opened in this firm database.</p>
               </div>
               <div className="firm-table-tools">
+                <button
+                  className="secondary-button ai-records-button"
+                  type="button"
+                  onClick={() => requestAiScan()}
+                  disabled={refreshingClaimsWithAi || cases.length === 0}
+                  title="Extract uploaded documents and fill missing claim and form fields"
+                >
+                  <Sparkles size={16} />
+                  {refreshingClaimsWithAi ? <ButtonSpinner label="Checking records..." /> : <span>Update with AI</span>}
+                </button>
                 <button className="primary-button" type="button" onClick={openClientOnboarding}>
                   <Plus size={17} />
                   Onboard client
@@ -1589,7 +1778,7 @@ export default function FirmClaimsPage() {
               {cases.length === 0 && <p className="muted">No RAF claims yet.</p>}
               {cases.length > 0 && filteredCases.length === 0 && <p className="muted">No claims match the selected filters.</p>}
               {filteredCases.length > 0 && (
-                <table className="firm-table claims-table">
+                <table className="firm-table firm-records-table claims-table">
                   <colgroup>
                     <col className="claim-reference-col" />
                     <col className="claim-client-col" />
@@ -1607,7 +1796,7 @@ export default function FirmClaimsPage() {
                     <tr>
                       <th>Claim reference</th>
                       <th>Client</th>
-                      <th>Accident date</th>
+	                      <th>Accident date</th>
 	                      <th>Opened</th>
                       <th>Medical request</th>
                       <th>Status</th>
@@ -1631,7 +1820,7 @@ export default function FirmClaimsPage() {
 	                            <span>Case #{caseRecord.id}</span>
                           </td>
                           <td data-label="Client">{caseRecord.first_name} {caseRecord.surname}</td>
-                          <td data-label="Accident date">{formatDisplayDate(caseRecord.accident_date)}</td>
+	                          <td data-label="Accident date">{formatDisplayDate(caseRecord.accident_date)}</td>
 	                          <td data-label="Opened">{new Date(caseRecord.opened_at).toLocaleDateString()}</td>
                           <td data-label="Medical request">
                             <button
@@ -1683,6 +1872,19 @@ export default function FirmClaimsPage() {
 	                          </td>
 		                          <td data-label="Actions">
 		                            <div className="table-actions">
+	                              {canAssignMatters && <button type="button" onClick={() => openAssignmentModal(caseRecord)} title={caseRecord.responsible_lawyer_user_id ? 'Reassign matter' : 'Assign matter'} aria-label={`Assign ${caseRecord.case_reference}`}><UserRoundCheck size={15} /></button>}
+	                              <button
+	                                className="claim-ai-action"
+	                                type="button"
+	                                onClick={() => requestAiScan(caseRecord)}
+	                                disabled={refreshingClaimsWithAi}
+	                                title={`Scan uploaded documents for ${caseRecord.first_name} ${caseRecord.surname}`}
+	                                aria-label={`Update ${caseRecord.case_reference} with AI`}
+	                              >
+	                                {refreshingClaimsWithAi && aiRefreshModal?.scope?.id === caseRecord.id
+	                                  ? <LoadingSpinner size="sm" label="Scanning client documents..." />
+	                                  : <Sparkles size={15} />}
+	                              </button>
 		                              <button
 		                                type="button"
 		                                onClick={() => setIntakeCase(caseRecord)}
@@ -1726,6 +1928,41 @@ export default function FirmClaimsPage() {
 	              )}
             </div>
           </section>
+          {assignmentCase && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="assignment-modal-title">
+                <div className="modal-header">
+                  <div>
+                    <h3 id="assignment-modal-title">{assignmentCase.responsible_lawyer_user_id ? 'Reassign Matter' : 'Assign Matter'}</h3>
+                    <p>{assignmentCase.case_reference} · {assignmentCase.first_name} {assignmentCase.surname}</p>
+                  </div>
+                  <button className="icon-button ghost" type="button" onClick={closeAssignmentModal} aria-label="Close assignment"><X size={18} /></button>
+                </div>
+                <form className="form-stack firm-form" onSubmit={saveMatterAssignment}>
+                  <label>
+                    Responsible Lawyer
+                    <select value={assignmentForm.responsible_lawyer_user_id} onChange={(event) => setAssignmentForm((current) => ({ ...current, responsible_lawyer_user_id: event.target.value }))} required>
+                      <option value="">Choose lawyer</option>
+                      {lawyerOptions.map((member) => <option value={member.id} key={member.id}>{member.name}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Assigned Assistant
+                    <select value={assignmentForm.assigned_assistant_user_id} onChange={(event) => setAssignmentForm((current) => ({ ...current, assigned_assistant_user_id: event.target.value }))}>
+                      <option value="">No assistant</option>
+                      {assistantOptions.map((member) => <option value={member.id} key={member.id}>{member.name}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Assignment note
+                    <textarea rows="3" value={assignmentForm.assignment_note} onChange={(event) => setAssignmentForm((current) => ({ ...current, assignment_note: event.target.value }))} placeholder="Instructions for the assigned team" />
+                  </label>
+                  {assignmentCase.responsible_lawyer_user_id && <label>Reason for reassignment<textarea rows="3" value={assignmentForm.reason} onChange={(event) => setAssignmentForm((current) => ({ ...current, reason: event.target.value }))} placeholder="Lawyer unavailable, workload balancing, matter transferred…" required /></label>}
+                  <div className="modal-actions"><button className="secondary-button" type="button" onClick={closeAssignmentModal}>Cancel</button><button className="primary-button" disabled={savingAssignment}>{savingAssignment ? <ButtonSpinner label="Saving..." /> : 'Confirm Assignment'}</button></div>
+                </form>
+              </section>
+            </div>
+          )}
           {claimModalOpen && (
             <div className="modal-backdrop" role="presentation">
               <section className="modal-panel raf-claim-modal" role="dialog" aria-modal="true" aria-labelledby="raf-claim-title">
@@ -1785,6 +2022,33 @@ export default function FirmClaimsPage() {
                       </label>
                     </div>
                   </section>
+
+                  {canAssignMatters && (
+                    <section className="raf-claim-section">
+                      <h4>Matter assignment</h4>
+                      <div className="raf-claim-grid">
+                        <label>
+                          Responsible Lawyer
+                          <select value={newClaimForm.responsible_lawyer_user_id} onChange={(event) => updateNewClaimField('responsible_lawyer_user_id', event.target.value)}>
+                            <option value="">Assign later</option>
+                            {lawyerOptions.map((member) => <option value={member.id} key={member.id}>{member.name}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          Assigned Assistant
+                          <select value={newClaimForm.assigned_assistant_user_id} onChange={(event) => updateNewClaimField('assigned_assistant_user_id', event.target.value)} disabled={!newClaimForm.responsible_lawyer_user_id}>
+                            <option value="">No assistant</option>
+                            {assistantOptions.map((member) => <option value={member.id} key={member.id}>{member.name}</option>)}
+                          </select>
+                        </label>
+                        <label className="span-2">
+                          Assignment note
+                          <textarea value={newClaimForm.assignment_note} onChange={(event) => updateNewClaimField('assignment_note', event.target.value)} placeholder="Initial instructions for the assigned team" />
+                        </label>
+                      </div>
+                      {lawyerOptions.length === 0 && <p className="muted">Add an active lawyer on the Team Members page to assign this matter now.</p>}
+                    </section>
+                  )}
 
                   <section className="raf-claim-section">
                     <h4>Banking details</h4>
@@ -2272,54 +2536,229 @@ export default function FirmClaimsPage() {
               </section>
             </div>
           )}
+          {aiScanConfirmation && (
+            <div className="modal-backdrop confirm-backdrop" role="presentation">
+              <section className="confirm-panel warning ai-scan-confirmation" role="dialog" aria-modal="true" aria-labelledby="ai-scan-confirm-title">
+                <span className="confirm-icon" aria-hidden="true"><Sparkles size={24} /></span>
+                <div className="confirm-copy">
+                  <h3 id="ai-scan-confirm-title">Run AI document scan?</h3>
+                  <p>
+                    {aiScanConfirmation.caseRecord
+                      ? `Scan every uploaded document for ${aiScanConfirmation.caseRecord.first_name} ${aiScanConfirmation.caseRecord.surname} · ${aiScanConfirmation.caseRecord.case_reference}.`
+                      : `Scan every uploaded document across all ${cases.length} accessible claim${cases.length === 1 ? '' : 's'}.`}
+                  </p>
+                </div>
+                <div className="ai-scan-confirm-details">
+                  <span><CheckCircle2 size={15} /> Existing manual values will not be overwritten.</span>
+                  <span><FileText size={15} /> Uploaded files will be sent to the configured AI model.</span>
+                  <span><Sparkles size={15} /> Documents are reprocessed and may use AI credits.</span>
+                </div>
+                <div className="modal-actions">
+                  <button className="secondary-button" type="button" onClick={() => setAiScanConfirmation(null)}>Cancel</button>
+                  <button className="primary-button" type="button" onClick={confirmAiScan}>
+                    <Sparkles size={16} />
+                    Run AI scan
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+          {aiRefreshModal && (
+            <div className="modal-backdrop ai-refresh-backdrop" role="presentation">
+              <section className="modal-panel ai-refresh-modal" role="dialog" aria-modal="true" aria-labelledby="ai-refresh-title">
+                <div className="modal-header ai-refresh-header">
+                  <div>
+                    <span className="eyebrow">AI record review</span>
+                    <h3 id="ai-refresh-title">{aiRefreshModal.scope ? `Scan ${aiRefreshModal.scope.clientName}` : 'Scan all uploaded documents'}</h3>
+                    <p>
+                      {aiRefreshModal.scope ? `${aiRefreshModal.scope.caseReference} · ` : ''}
+                      Verified document data fills missing claim fields and template inputs only.
+                    </p>
+                  </div>
+                  <button className="icon-button ghost" type="button" onClick={() => setAiRefreshModal(null)} aria-label="Close AI document scan">
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className={`ai-refresh-hero ${aiRefreshModal.phase}`}>
+                  <div className={`ai-scan-orb ${aiRefreshBusy ? 'active' : ''}`} aria-hidden="true">
+                    <Sparkles size={24} />
+                  </div>
+                  <div className="ai-refresh-hero-copy">
+                    <strong>
+                      {aiRefreshModal.phase === 'loading' && 'Preparing document scan'}
+                      {aiRefreshModal.phase === 'scanning' && 'Reading every uploaded document'}
+                      {aiRefreshModal.phase === 'forms' && 'Filling missing form inputs'}
+                      {aiRefreshModal.phase === 'complete' && 'AI record review complete'}
+                      {aiRefreshModal.phase === 'failed' && 'AI record review stopped'}
+                    </strong>
+                    <span>
+                      {aiRefreshModal.phase === 'loading' && 'Finding every uploaded file for each accessible client...'}
+                      {aiRefreshModal.phase === 'scanning' && `${aiRefreshChecked} of ${aiRefreshDocuments.length} documents checked${aiRefreshModal.model ? ` with ${aiRefreshModal.model}` : ''}.`}
+                      {aiRefreshModal.phase === 'forms' && 'Document facts are saved. Attached templates are being updated.'}
+                      {aiRefreshModal.phase === 'complete' && `${aiRefreshChecked} documents checked across ${aiRefreshModal.summary?.claims_checked || 0} claim(s).`}
+                      {aiRefreshModal.phase === 'failed' && (aiRefreshModal.error || 'The scan could not be completed.')}
+                    </span>
+                  </div>
+                  <strong className="ai-refresh-percent">{aiRefreshModal.phase === 'loading' ? '—' : `${aiRefreshProgress}%`}</strong>
+                </div>
+
+                <div className="ai-refresh-progress" aria-label={`${aiRefreshProgress}% of documents checked`}>
+                  <i style={{ width: `${aiRefreshProgress}%` }} />
+                </div>
+
+                <div className="ai-refresh-document-list">
+                  {aiRefreshModal.phase === 'loading' && (
+                    <div className="ai-refresh-empty"><LoadingSpinner size="md" label="Loading uploaded documents..." /><span>Loading uploaded documents...</span></div>
+                  )}
+                  {aiRefreshModal.phase !== 'loading' && aiRefreshDocuments.length === 0 && (
+                    <div className="ai-refresh-empty"><FileCheck2 size={20} /><span>No uploaded documents need checking.</span></div>
+                  )}
+                  {aiRefreshDocuments.map((document) => (
+                    <article className={`ai-refresh-document ${document.run_status}`} key={document.upload_id}>
+                      <span className="ai-refresh-document-icon" aria-hidden="true">
+                        {document.run_status === 'processing' ? <LoadingSpinner size="sm" label="Scanning document..." /> :
+                          ['ready', 'completed'].includes(document.run_status) ? <CheckCircle2 size={17} /> : <FileText size={17} />}
+                      </span>
+                      <div className="ai-refresh-document-copy">
+                        <strong title={document.original_filename}>{document.original_filename}</strong>
+                        <span>{document.first_name} {document.surname} · {document.case_reference}</span>
+                        <small>{document.document_label}</small>
+                      </div>
+                      <span className="ai-refresh-document-status">
+                        {document.run_status === 'queued' && 'Waiting'}
+                        {document.run_status === 'processing' && `Scanning${aiRefreshModal.model ? ` · ${aiRefreshModal.model}` : ''}`}
+                        {document.run_status === 'ready' && `Previously extracted${document.ai_model ? ` · ${document.ai_model}` : ''}`}
+                        {document.run_status === 'completed' && `Scanned · ${document.ai_model || aiRefreshModal.model}`}
+                        {document.run_status === 'failed' && 'Needs review'}
+                        {document.run_status === 'skipped' && 'Skipped'}
+                      </span>
+                    </article>
+                  ))}
+                  {aiRefreshModal.summary?.field_results?.length > 0 && (
+                    <details className="ai-field-review-results" open>
+                      <summary>
+                        <span>Empty input review</span>
+                        <strong>{aiRefreshModal.summary.fields_checked} checked · {aiRefreshModal.summary.inputs_added} filled</strong>
+                      </summary>
+                      <div className="ai-field-review-list">
+                        {aiRefreshModal.summary.field_results.map((field, index) => (
+                          <article className={`ai-field-review-row ${field.status}`} key={`${field.attachment_id}-${field.field_name}-${index}`}>
+                            <div className="ai-field-review-copy">
+                              <strong title={field.label || field.field_name}>{field.label || field.field_name}</strong>
+                              <span>{field.client_name} · {field.template_name}</span>
+                              <small title={field.reason}>{field.reason}</small>
+                            </div>
+                            {field.value && <code title={String(field.value)}>{String(field.value)}</code>}
+                            <span className="ai-field-review-status">
+                              {field.status === 'fillable' && 'Filled'}
+                              {field.status === 'no_evidence' && 'No evidence'}
+                              {field.status === 'conflict' && 'Conflict'}
+                              {field.status === 'protected' && 'Manual only'}
+                              {field.status === 'review_failed' && 'Review failed'}
+                            </span>
+                          </article>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+
+                {aiRefreshModal.summary && (
+                  <div className="ai-refresh-summary">
+                    <span><strong>{aiRefreshModal.summary.documents_checked}</strong> documents checked</span>
+                    <span><strong>{aiRefreshModal.summary.forms_updated}</strong> forms updated</span>
+                    <span><strong>{aiRefreshModal.summary.fields_checked}</strong> inputs checked</span>
+                    <span><strong>{aiRefreshModal.summary.inputs_added}</strong> inputs added</span>
+                    <span><strong>{Number(aiRefreshModal.summary.uploads_failed || 0) + Number(aiRefreshModal.summary.forms_failed || 0) + Number(aiRefreshModal.summary.field_review_required || 0)}</strong> need review</span>
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
           {intakeCase && (
-            <div className="modal-backdrop" role="presentation">
+            <div className="modal-backdrop document-intake-backdrop" role="presentation">
 	              <section className="modal-panel document-intake-modal" role="dialog" aria-modal="true" aria-labelledby="document-intake-title">
-	                <div className="modal-header">
-	                  <div>
-	                    <h3 id="document-intake-title">Document intake</h3>
+	                <div className="client-documents-header firm-intake-header">
+	                  <div className="firm-intake-heading">
+	                    <span className="eyebrow">Supporting documents</span>
+	                    <div className="firm-intake-title-row">
+	                      <h3 id="document-intake-title">Upload checklist</h3>
+	                      <span className="firm-intake-count">{intakeUploadedCount}/{intakeRequests.length} received · {intakeProgress}% complete</span>
+	                    </div>
 	                    <p>{intakeCase.first_name} {intakeCase.surname} · {intakeCase.case_reference}</p>
 	                  </div>
-	                  <button className="icon-button ghost" type="button" onClick={() => setIntakeCase(null)} aria-label="Close document intake">
-	                    <X size={18} />
-	                  </button>
+	                  <div className="document-intake-header-actions">
+	                    <button className="secondary-button compact firm-intake-copy-button" type="button" onClick={() => copyClientIntakeLink(intakeCase)}>
+	                      <Copy size={15} />
+	                      <span>{copiedClientId === intakeCase.client_id ? 'Link copied' : 'Copy client link'}</span>
+	                    </button>
+	                    <button className="icon-button ghost" type="button" onClick={() => { setIntakeCase(null); setIntakeFiles({}); }} aria-label="Close document intake">
+	                      <X size={18} />
+	                    </button>
+	                  </div>
 	                </div>
-	                <div className="table-list document-intake-list">
+	                <div className="client-upload-progress-bar" aria-hidden="true">
+	                  <i style={{ width: `${intakeProgress}%` }} />
+	                </div>
+	                <div className="client-request-list document-intake-list">
 	                  {intakeRequests.length === 0 && <p className="muted">No document requests yet.</p>}
-	                  {intakeRequests.map((request) => (
-	                    <div className="workspace-row document-request-row" key={request.id}>
-	                      <div>
-	                        <strong>{request.label}</strong>
-	                        <span>
-	                          {request.first_name} {request.surname} · {request.status} · {request.upload_count} upload(s)
-	                          {request.latest_upload_filename ? ` · ${request.latest_upload_filename}` : ''}
-	                        </span>
+	                  {intakeRequests.map((request) => {
+	                    const isUploaded = Number(request.upload_count || 0) > 0;
+	                    const selectedFile = intakeFiles[request.id];
+	                    return (
+	                    <article className={`client-request-card firm-intake-request ${isUploaded ? 'uploaded' : ''} ${selectedFile ? 'ready' : ''}`} key={request.id}>
+	                      <span className="client-request-icon" aria-hidden="true">
+	                        {isUploaded ? <CheckCircle2 size={18} /> : <FolderOpen size={18} />}
+	                      </span>
+	                      <div className="client-request-copy">
+	                        <div className="client-request-title-row"><h3>{request.label}</h3></div>
+	                        {request.instructions && <p className="client-request-guidance">{request.instructions}</p>}
+	                        {isUploaded ? (
+	                          <p className="firm-intake-filename" title={request.latest_upload_filename || 'Uploaded document'}>
+	                            <span>{request.upload_count} file(s) received</span>
+	                            <strong>{request.latest_upload_filename || 'Uploaded document'}</strong>
+	                          </p>
+	                        ) : <p>PDF, image, or Word file.</p>}
+	                        {request.latest_ai_status === 'completed' && <p className="firm-intake-ai-success">AI extraction complete. Claim data and forms were updated.</p>}
+	                        {['failed', 'skipped'].includes(request.latest_ai_status) && <p className="firm-intake-ai-error">AI extraction needs staff review.</p>}
+	                        <div className="client-selected-file-row">
+	                          <div className={`client-selected-file ${selectedFile ? 'ready' : ''}`} title={selectedFile?.name || 'No file selected yet'}>
+	                            {selectedFile ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />}
+	                            <span>{selectedFile?.name || 'No file selected yet'}</span>
+	                          </div>
+	                        </div>
 	                      </div>
-	                      <div className="document-request-actions">
-	                        <button
-	                          type="button"
-	                          onClick={() => viewUpload(request)}
-	                          disabled={viewingRequestId === request.id}
-	                          title="View document record"
-	                          aria-label={`View ${request.label} for ${request.first_name} ${request.surname}`}
-	                        >
-	                          {viewingRequestId === request.id ? <LoadingSpinner size="sm" label="Opening document..." /> : <Eye size={15} />}
+	                      <div className="client-request-actions firm-intake-actions">
+	                        {!selectedFile && <span className={`client-request-status ${isUploaded ? 'active' : 'pending'}`}>{isUploaded ? 'Received' : 'Requested'}</span>}
+	                        {isUploaded && (
+	                          <button
+	                            className="secondary-button"
+	                            type="button"
+	                            onClick={() => viewUpload(request)}
+	                            disabled={viewingRequestId === request.id}
+	                            aria-label={`View ${request.label} for ${request.first_name} ${request.surname}`}
+	                          >
+	                            {viewingRequestId === request.id ? <LoadingSpinner size="sm" label="Opening document..." /> : <><Eye size={15} /><span>View</span></>}
+	                          </button>
+	                        )}
+	                        <button className="secondary-button file-picker-button" type="button" onClick={() => intakeFileInputRefs.current[request.id]?.click()}>
+	                          {selectedFile ? 'Change' : 'Choose file'}
 	                        </button>
-	                        <label title="Upload document" aria-label={`Upload ${request.label}`}>
-	                          {uploadingRequestId === request.id ? <LoadingSpinner size="sm" label="Uploading document..." /> : <UploadCloud size={15} />}
-	                          <input
-	                            type="file"
-	                            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
-	                            disabled={uploadingRequestId === request.id}
-	                            onChange={(event) => {
-	                              uploadDocument(request, event.target.files?.[0]);
-	                              event.target.value = '';
-	                            }}
-	                          />
-	                        </label>
+	                        <input
+	                          className="file-picker-input"
+	                          ref={(node) => { if (node) intakeFileInputRefs.current[request.id] = node; else delete intakeFileInputRefs.current[request.id]; }}
+	                          type="file"
+	                          accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+	                          onChange={(event) => setIntakeFiles((current) => ({ ...current, [request.id]: event.target.files?.[0] || null }))}
+	                        />
+	                        <button className={`primary-button ${selectedFile ? 'success-button' : ''}`} type="button" disabled={uploadingRequestId === request.id || !selectedFile} onClick={() => uploadDocument(request, selectedFile)}>
+	                          <UploadCloud size={15} />
+	                          {uploadingRequestId === request.id ? <ButtonSpinner label="Uploading..." /> : isUploaded ? 'Upload another' : 'Upload'}
+	                        </button>
 	                      </div>
-	                    </div>
-	                  ))}
+	                    </article>
+	                  );})}
 	                </div>
 	              </section>
 	            </div>
@@ -2407,6 +2846,15 @@ export default function FirmClaimsPage() {
 	                            <strong>{fillingProgress}%</strong>
 	                          </div>
 	                          <progress value={fillingProgress} max="100" aria-label="Filling document inputs" />
+	                        </div>
+	                      )}
+	                      {fillingClaimFormId !== form.id && aiFillResults[form.id] && (
+	                        <div className={`claim-form-ai-result ${aiFillResults[form.id].added > 0 ? 'updated' : 'unchanged'}`} role="status">
+	                          <strong>{aiFillResults[form.id].added > 0 ? `AI added ${aiFillResults[form.id].added} new input${aiFillResults[form.id].added === 1 ? '' : 's'}` : 'AI fill completed — no new verified values found'}</strong>
+	                          <span>
+	                            {aiFillResults[form.id].filled}/{aiFillResults[form.id].total} inputs filled ({aiFillResults[form.id].percentage}%) · {aiFillResults[form.id].documentsUsed} extracted document{aiFillResults[form.id].documentsUsed === 1 ? '' : 's'} used · {aiFillResults[form.id].completedAt}
+	                          </span>
+	                          {aiFillResults[form.id].added === 0 && <small>Upload additional supporting documents or complete the remaining medical and signature fields manually.</small>}
 	                        </div>
 	                      )}
 	                    </div>

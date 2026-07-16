@@ -43,7 +43,17 @@ export function AuthProvider({ children }) {
     setUser(null);
   }
 
-  const value = useMemo(() => ({ token, user, login, register, logout, isAuthenticated: Boolean(token) }), [token, user]);
+  function updateUser(patch) {
+    setUser((current) => {
+      if (!current) return current;
+      const nextUser = { ...current, ...patch };
+      const storage = localStorage.getItem('orc_token') ? localStorage : sessionStorage;
+      storage.setItem('orc_user', JSON.stringify(nextUser));
+      return nextUser;
+    });
+  }
+
+  const value = useMemo(() => ({ token, user, login, register, logout, updateUser, isAuthenticated: Boolean(token) }), [token, user]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

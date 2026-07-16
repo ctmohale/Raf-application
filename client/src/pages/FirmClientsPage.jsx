@@ -213,7 +213,7 @@ export default function FirmClientsPage() {
       </div>
 
       <section className="panel">
-        <div className="panel-header firm-table-header">
+        <div className="panel-header">
           <div>
             <h3>Firm clients</h3>
             <p>Onboarded clients and upload links for RAF applications.</p>
@@ -255,7 +255,7 @@ export default function FirmClientsPage() {
           {clients.length === 0 && <p className="muted">No clients onboarded yet.</p>}
           {clients.length > 0 && filteredClients.length === 0 && <p className="muted">No clients match the selected filters.</p>}
           {filteredClients.length > 0 && (
-            <table className="firm-table clients-table">
+            <table className="firm-table firm-records-table clients-table">
               <colgroup>
                 <col className="client-name-col" />
                 <col className="client-id-col" />
@@ -301,10 +301,12 @@ export default function FirmClientsPage() {
                         <span className={`status-pill ${documentTone}`}>{uploadedDocuments}/{requestedDocuments}</span>
                       </td>
                       <td data-label="Reminders">
-                        <span className={`status-pill ${client.auto_reminders_enabled ? client.reminder_due ? 'warning' : 'active' : 'neutral'}`}>
-                          {client.auto_reminders_enabled ? client.reminder_due ? 'Due' : 'On' : 'Off'}
-                        </span>
-                        {client.auto_reminders_enabled && <span>{client.reminder_time}</span>}
+                        <div className="client-reminder-status">
+                          <span className={`status-pill ${client.auto_reminders_enabled ? client.reminder_due ? 'warning' : 'active' : 'neutral'}`}>
+                            {client.auto_reminders_enabled ? client.reminder_due ? 'Due' : 'On' : 'Off'}
+                          </span>
+                          {client.auto_reminders_enabled && <span className="client-reminder-time">{client.reminder_time}</span>}
+                        </div>
                       </td>
                       <td data-label="Actions">
                         <div className="table-actions">
