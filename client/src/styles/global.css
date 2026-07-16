@@ -9803,6 +9803,20 @@ th {
   font-size: 12px;
 }
 
+.ai-refresh-empty.warning {
+  justify-content: flex-start;
+  padding: 14px;
+  border: 1px solid rgba(217, 119, 6, 0.22);
+  border-radius: 12px;
+  color: #92400e;
+  background: #fff8ed;
+}
+
+.ai-refresh-empty.warning svg {
+  flex: 0 0 auto;
+  color: #d97706;
+}
+
 .ai-field-review-results {
   margin-top: 5px;
   border: 1px solid var(--line);

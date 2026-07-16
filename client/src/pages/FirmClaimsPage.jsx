@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { BellRing, BriefcaseBusiness, CheckCircle2, CircleDashed, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Mail, Maximize2, MessageCircle, Minimize2, Plus, Search, Send, Share2, Sparkles, Trash2, Type, UploadCloud, UserRoundCheck, X } from 'lucide-react';
+import { BellRing, BriefcaseBusiness, CheckCircle2, CircleDashed, Clock3, Copy, Download, Edit3, Eye, FileCheck2, FilePlus2, FileText, Filter, FolderOpen, Mail, Maximize2, MessageCircle, Minimize2, Plus, Search, Send, Share2, Sparkles, Trash2, TriangleAlert, Type, UploadCloud, UserRoundCheck, X } from 'lucide-react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ButtonSpinner, LoadingSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
@@ -383,6 +383,7 @@ export default function FirmClaimsPage() {
   const aiRefreshChecked = aiRefreshDocuments.filter((document) => ['ready', 'completed', 'failed', 'skipped'].includes(document.run_status)).length;
   const aiRefreshProgress = aiRefreshDocuments.length ? Math.round((aiRefreshChecked / aiRefreshDocuments.length) * 100) : 0;
   const aiRefreshBusy = ['loading', 'scanning', 'forms'].includes(aiRefreshModal?.phase);
+  const aiRefreshHasNoDocuments = Boolean(aiRefreshModal && aiRefreshModal.phase !== 'loading' && aiRefreshDocuments.length === 0);
   const medicalAssessmentsByCase = medicalAssessmentRequests.reduce((groups, request) => {
     const key = request.case_id;
     groups[key] = groups[key] || [];
@@ -1156,10 +1157,13 @@ export default function FirmClaimsPage() {
       };
       setWorkspace(result.workspace);
       setAiRefreshModal((current) => current ? { ...current, phase: 'complete', documents, summary } : current);
+      const messagePrefix = scopedClaim ? `${scopedClaim.clientName}: ` : '';
+      const uploadReviewMessage = summary.documents_checked === 0
+        ? 'No uploaded documents to scan. Upload at least one supporting document before running document review.'
+        : `${summary.documents_checked} uploaded document${summary.documents_checked === 1 ? '' : 's'}. ${summary.uploads_extracted} scanned successfully,`;
       setMessage(
-        `${scopedClaim ? `${scopedClaim.clientName}: ` : ''}AI checked ${summary.claims_checked} claim${summary.claims_checked === 1 ? '' : 's'} and `
-        + `${summary.documents_checked} uploaded document${summary.documents_checked === 1 ? '' : 's'}. `
-        + `${summary.uploads_extracted} scanned successfully, `
+        `${messagePrefix}AI checked ${summary.claims_checked} claim${summary.claims_checked === 1 ? '' : 's'} and `
+        + `${uploadReviewMessage} `
         + `updated ${summary.forms_updated} form${summary.forms_updated === 1 ? '' : 's'} `
         + `and checked ${summary.fields_checked} empty input${summary.fields_checked === 1 ? '' : 's'}; `
         + `${summary.inputs_added} could be filled.`
@@ -2582,21 +2586,21 @@ export default function FirmClaimsPage() {
 
                 <div className={`ai-refresh-hero ${aiRefreshModal.phase}`}>
                   <div className={`ai-scan-orb ${aiRefreshBusy ? 'active' : ''}`} aria-hidden="true">
-                    <Sparkles size={24} />
+                    {aiRefreshHasNoDocuments ? <TriangleAlert size={24} /> : <Sparkles size={24} />}
                   </div>
                   <div className="ai-refresh-hero-copy">
                     <strong>
                       {aiRefreshModal.phase === 'loading' && 'Preparing document scan'}
-                      {aiRefreshModal.phase === 'scanning' && 'Reading every uploaded document'}
+                      {aiRefreshModal.phase === 'scanning' && (aiRefreshHasNoDocuments ? 'No documents to scan' : 'Reading every uploaded document')}
                       {aiRefreshModal.phase === 'forms' && 'Filling missing form inputs'}
-                      {aiRefreshModal.phase === 'complete' && 'AI record review complete'}
+                      {aiRefreshModal.phase === 'complete' && (aiRefreshHasNoDocuments ? 'No documents to scan' : 'AI record review complete')}
                       {aiRefreshModal.phase === 'failed' && 'AI record review stopped'}
                     </strong>
                     <span>
                       {aiRefreshModal.phase === 'loading' && 'Finding every uploaded file for each accessible client...'}
-                      {aiRefreshModal.phase === 'scanning' && `${aiRefreshChecked} of ${aiRefreshDocuments.length} documents checked${aiRefreshModal.model ? ` with ${aiRefreshModal.model}` : ''}.`}
+                      {aiRefreshModal.phase === 'scanning' && (aiRefreshHasNoDocuments ? 'Upload a supporting document before running document review.' : `${aiRefreshChecked} of ${aiRefreshDocuments.length} documents checked${aiRefreshModal.model ? ` with ${aiRefreshModal.model}` : ''}.`)}
                       {aiRefreshModal.phase === 'forms' && 'Document facts are saved. Attached templates are being updated.'}
-                      {aiRefreshModal.phase === 'complete' && `${aiRefreshChecked} documents checked across ${aiRefreshModal.summary?.claims_checked || 0} claim(s).`}
+                      {aiRefreshModal.phase === 'complete' && (aiRefreshHasNoDocuments ? `${aiRefreshModal.summary?.claims_checked || 0} claim(s) checked, but no uploaded documents were available.` : `${aiRefreshChecked} documents checked across ${aiRefreshModal.summary?.claims_checked || 0} claim(s).`)}
                       {aiRefreshModal.phase === 'failed' && (aiRefreshModal.error || 'The scan could not be completed.')}
                     </span>
                   </div>
@@ -2611,8 +2615,11 @@ export default function FirmClaimsPage() {
                   {aiRefreshModal.phase === 'loading' && (
                     <div className="ai-refresh-empty"><LoadingSpinner size="md" label="Loading uploaded documents..." /><span>Loading uploaded documents...</span></div>
                   )}
-                  {aiRefreshModal.phase !== 'loading' && aiRefreshDocuments.length === 0 && (
-                    <div className="ai-refresh-empty"><FileCheck2 size={20} /><span>No uploaded documents need checking.</span></div>
+                  {aiRefreshHasNoDocuments && (
+                    <div className="ai-refresh-empty warning" role="status">
+                      <TriangleAlert size={20} />
+                      <span>No uploaded documents to scan. Upload at least one supporting document before running document review.</span>
+                    </div>
                   )}
                   {aiRefreshDocuments.map((document) => (
                     <article className={`ai-refresh-document ${document.run_status}`} key={document.upload_id}>
@@ -2635,7 +2642,7 @@ export default function FirmClaimsPage() {
                       </span>
                     </article>
                   ))}
-                  {aiRefreshModal.summary?.field_results?.length > 0 && (
+                  {aiRefreshModal.summary?.field_results?.length > 0 && !aiRefreshHasNoDocuments && (
                     <details className="ai-field-review-results" open>
                       <summary>
                         <span>Empty input review</span>
@@ -2721,6 +2728,7 @@ export default function FirmClaimsPage() {
 	                          </p>
 	                        ) : <p>PDF, image, or Word file.</p>}
 	                        {request.latest_ai_status === 'completed' && <p className="firm-intake-ai-success">AI extraction complete. Claim data and forms were updated.</p>}
+	                        {request.latest_ai_status === 'review_required' && <p className="firm-intake-ai-error">AI extraction complete, but staff review is required before updating this matter.</p>}
 	                        {['failed', 'skipped'].includes(request.latest_ai_status) && <p className="firm-intake-ai-error">AI extraction needs staff review.</p>}
 	                        <div className="client-selected-file-row">
 	                          <div className={`client-selected-file ${selectedFile ? 'ready' : ''}`} title={selectedFile?.name || 'No file selected yet'}>

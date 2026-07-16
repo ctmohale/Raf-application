@@ -447,7 +447,8 @@ export default function ClientUploadPage() {
                         {request.instructions && <p className="client-request-guidance">{request.instructions}</p>}
                         <p>{request.original_filename ? `${request.upload_count || 1} file(s) received · Latest: ${request.original_filename}` : 'PDF, image, or Word file. Upload additional files one at a time.'}</p>
                         {request.ai_status === 'completed' && <p>AI extraction complete. The claim record and attached forms were updated from verified fields.</p>}
-                        {request.ai_status === 'failed' && <p>The file was received, but AI extraction needs staff review.</p>}
+                        {request.ai_status === 'review_required' && <p>The file was read, but extracted details need staff review before updating the matter.</p>}
+                        {['failed', 'skipped'].includes(request.ai_status) && <p>The file was received, but AI extraction needs staff review.</p>}
                         <div className="client-selected-file-row">
                           <div className={`client-selected-file ${files[request.id] ? 'ready' : ''}`} title={files[request.id]?.name || 'No file selected yet'}>
                             {files[request.id] ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />}

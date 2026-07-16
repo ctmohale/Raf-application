@@ -11,6 +11,8 @@ import { getTemplateFields } from './templateAccess.js';
 
 const nullableText = z.string().nullable();
 const confidence = z.number().min(0).max(1);
+const localTextLimit = 14000;
+const openAiResponsesUrl = 'https://api.openai.com/v1/responses';
 
 const extractedDocumentSchema = z.object({
   document_kind: z.string(),
@@ -135,6 +137,25 @@ function compactObject(value) {
   return Object.fromEntries(Object.entries(value || {}).filter(([, entry]) => hasValue(entry)));
 }
 
+function normalizePersonText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function personMatchesClaim(party, claim) {
+  const extractedFirst = normalizePersonText(party?.first_name);
+  const extractedSurname = normalizePersonText(party?.surname);
+  const extractedFullName = normalizePersonText(party?.full_name);
+  const claimFirst = normalizePersonText(claim?.first_name);
+  const claimSurname = normalizePersonText(claim?.surname);
+
+  if (!extractedFirst && !extractedSurname && !extractedFullName) return true;
+  if (extractedSurname && claimSurname && extractedSurname !== claimSurname) return false;
+  if (extractedFirst && claimFirst && extractedFirst !== claimFirst) return false;
+  if (!extractedFirst && claimFirst && extractedFullName && !extractedFullName.includes(claimFirst)) return false;
+  if (!extractedSurname && claimSurname && extractedFullName && !extractedFullName.includes(claimSurname)) return false;
+  return true;
+}
+
 function mergeMissing(current, extracted) {
   const merged = { ...(current || {}) };
   for (const [key, value] of Object.entries(extracted || {})) {
@@ -157,38 +178,206 @@ function buildTemplateFieldPrompt(firmDb, caseId) {
   });
 }
 
-async function buildDocumentContent(upload, fileBuffer) {
+async function extractPdfText(fileBuffer) {
+  try {
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(fileBuffer), useSystemFonts: true });
+    const pdf = await loadingTask.promise;
+    const pages = [];
+
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .map((item) => String(item.str || '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (text) pages.push(`Page ${pageNumber}: ${text}`);
+      if (pages.join('\n\n').length >= localTextLimit) break;
+    }
+
+    return pages.join('\n\n').slice(0, localTextLimit);
+  } catch (error) {
+    console.warn('Local PDF text extraction skipped:', error.message);
+    return '';
+  }
+}
+
+async function extractLocalDocumentText(upload, fileBuffer) {
   const extension = path.extname(upload.original_filename || '').toLowerCase();
   const mediaType = upload.mime_type || '';
 
-  if (mediaType.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp'].includes(extension)) {
-    return [{
-      type: 'file',
-      data: fileBuffer,
-      mediaType: mediaType || `image/${extension.slice(1)}`,
-      filename: upload.original_filename
-    }];
-  }
-
   if (mediaType === 'application/pdf' || extension === '.pdf') {
-    return [{
-      type: 'file',
-      data: fileBuffer,
-      mediaType: 'application/pdf',
-      filename: upload.original_filename
-    }];
+    return extractPdfText(fileBuffer);
   }
 
   if (extension === '.docx' || mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
     const { value } = await mammoth.extractRawText({ buffer: fileBuffer });
-    return [{ type: 'text', text: `Extracted Word document text:\n\n${value}` }];
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, localTextLimit);
   }
 
   if (mediaType.startsWith('text/') || extension === '.txt') {
-    return [{ type: 'text', text: `Document text:\n\n${fileBuffer.toString('utf8')}` }];
+    return fileBuffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, localTextLimit);
+  }
+
+  return '';
+}
+
+async function buildDocumentContent(upload, fileBuffer) {
+  const extension = path.extname(upload.original_filename || '').toLowerCase();
+  const mediaType = upload.mime_type || '';
+  const localText = await extractLocalDocumentText(upload, fileBuffer);
+  const localTextPart = localText
+    ? [{
+        type: 'text',
+        text: `Local OCR/text extraction from ${upload.original_filename}:\n\n${localText}`
+      }]
+    : [];
+
+  if (mediaType.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp'].includes(extension)) {
+    return [
+      ...localTextPart,
+      {
+        type: 'file',
+        data: fileBuffer,
+        mediaType: mediaType || `image/${extension.slice(1)}`,
+        filename: upload.original_filename
+      }
+    ];
+  }
+
+  if (mediaType === 'application/pdf' || extension === '.pdf') {
+    return [
+      ...localTextPart,
+      {
+        type: 'file',
+        data: fileBuffer,
+        mediaType: 'application/pdf',
+        filename: upload.original_filename
+      }
+    ];
+  }
+
+  if (extension === '.docx' || mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return localTextPart.length ? localTextPart : [{ type: 'text', text: 'No readable Word document text was extracted.' }];
+  }
+
+  if (mediaType.startsWith('text/') || extension === '.txt') {
+    return localTextPart.length ? localTextPart : [{ type: 'text', text: 'No readable text was extracted.' }];
   }
 
   throw new Error('AI extraction currently supports PDF, image, DOCX, and text files. Convert legacy .doc files to PDF or DOCX.');
+}
+
+async function buildResponsesDocumentContent(upload, fileBuffer) {
+  const extension = path.extname(upload.original_filename || '').toLowerCase();
+  const mediaType = upload.mime_type || '';
+  const localText = await extractLocalDocumentText(upload, fileBuffer);
+  const content = [];
+
+  if (localText) {
+    content.push({
+      type: 'input_text',
+      text: `Local OCR/text extraction from ${upload.original_filename}:\n\n${localText}`
+    });
+  }
+
+  if (mediaType === 'application/pdf' || extension === '.pdf') {
+    content.push({
+      type: 'input_file',
+      filename: upload.original_filename || 'uploaded-document.pdf',
+      file_data: `data:application/pdf;base64,${fileBuffer.toString('base64')}`
+    });
+    return content;
+  }
+
+  if (mediaType.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp'].includes(extension)) {
+    const imageType = mediaType || `image/${extension.slice(1)}`;
+    content.push({
+      type: 'input_image',
+      detail: 'high',
+      image_url: `data:${imageType};base64,${fileBuffer.toString('base64')}`
+    });
+    return content;
+  }
+
+  if (extension === '.docx' || mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return content.length ? content : [{ type: 'input_text', text: 'No readable Word document text was extracted.' }];
+  }
+
+  if (mediaType.startsWith('text/') || extension === '.txt') {
+    return content.length ? content : [{ type: 'input_text', text: 'No readable text was extracted.' }];
+  }
+
+  throw new Error('AI extraction currently supports PDF, image, DOCX, and text files. Convert legacy .doc files to PDF or DOCX.');
+}
+
+function extractResponseText(responseBody) {
+  if (typeof responseBody?.output_text === 'string') return responseBody.output_text;
+  const output = Array.isArray(responseBody?.output) ? responseBody.output : [];
+  return output
+    .flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map((content) => content.text || '')
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+async function generateDocumentExtractionWithOpenAi({ request, claim, templateFields, upload, fileBuffer }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000);
+
+  try {
+    const response = await fetch(openAiResponsesUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.openAiApiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: config.aiExtractionModel,
+        store: false,
+        input: [{
+          role: 'user',
+          content: [
+            { type: 'input_text', text: extractionInstructions({ request, claim, templateFields }) },
+            ...await buildResponsesDocumentContent(upload, fileBuffer)
+          ]
+        }],
+        text: {
+          format: {
+            type: 'json_schema',
+            name: 'raf_document_extraction',
+            description: 'Verified structured facts extracted from one RAF claim document',
+            schema: z.toJSONSchema(extractedDocumentSchema),
+            strict: false
+          }
+        }
+      }),
+      signal: controller.signal
+    });
+
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body?.error?.message || `OpenAI API request failed with HTTP ${response.status}`);
+    }
+    if (body?.status === 'failed') {
+      throw new Error(body?.error?.message || 'OpenAI response failed');
+    }
+
+    const text = extractResponseText(body);
+    const parsed = JSON.parse(text);
+    return extractedDocumentSchema.parse(parsed);
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('OpenAI extraction timed out after 180 seconds');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function extractionInstructions({ request, claim, templateFields }) {
@@ -200,7 +389,9 @@ Known client: ${claim.first_name} ${claim.surname}
 Existing case summary (may be empty): ${claim.ai_summary || ''}
 
 Requirements:
-- Read typed and handwritten content carefully. Use the document itself as the source of truth.
+- Read typed and handwritten content carefully. Use the uploaded file as the source of truth.
+- Use the local OCR/text extraction when it is available, but verify it against the attached file because OCR can split words or miss handwriting.
+- For scanned PDFs and images, perform visual OCR from the attached file and extract visible text even when local OCR/text extraction is empty.
 - Never invent a value. Use null for missing scalar values and [] for missing lists.
 - Dates must be YYYY-MM-DD when the full date is known; otherwise preserve the visible text in facts.
 - Keep ID, passport, case, report, account and invoice numbers exactly as printed.
@@ -216,6 +407,7 @@ ${JSON.stringify(templateFields.slice(0, 250))}`;
 
 function updateRelevantClaimFields(firmDb, claim, extraction) {
   const claimant = extraction.parties.find((party) => /claimant|client|patient|injured/i.test(party.role)) || extraction.parties[0] || {};
+  const claimantMatches = personMatchesClaim(claimant, claim);
   const bank = mergeMissing(parseJson(claim.banking_json), extraction.banking);
   const firstVehicle = extraction.accident.vehicles[0] || {};
   const firstDriver = compactObject({ name: firstVehicle.driver_name });
@@ -224,6 +416,7 @@ function updateRelevantClaimFields(firmDb, claim, extraction) {
   firmDb.prepare(`
     UPDATE firm_clients
     SET
+      id_number = CASE WHEN ? AND COALESCE(TRIM(id_number), '') = '' THEN ? ELSE id_number END,
       passport_number = CASE WHEN COALESCE(TRIM(passport_number), '') = '' THEN ? ELSE passport_number END,
       date_of_birth = CASE WHEN COALESCE(TRIM(date_of_birth), '') = '' THEN ? ELSE date_of_birth END,
       residential_address = CASE WHEN COALESCE(TRIM(residential_address), '') = '' THEN ? ELSE residential_address END,
@@ -233,12 +426,14 @@ function updateRelevantClaimFields(firmDb, claim, extraction) {
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(
-    claimant.passport_number,
-    claimant.date_of_birth,
-    claimant.address,
-    extraction.employment.occupation,
-    extraction.employment.employer,
-    Object.keys(compactObject(bank)).length ? JSON.stringify(compactObject(bank)) : claim.banking_json,
+    claimantMatches ? 1 : 0,
+    claimant.id_number,
+    claimantMatches ? claimant.passport_number : null,
+    claimantMatches ? claimant.date_of_birth : null,
+    claimantMatches ? claimant.address : null,
+    claimantMatches ? extraction.employment.occupation : null,
+    claimantMatches ? extraction.employment.employer : null,
+    claimantMatches && Object.keys(compactObject(bank)).length ? JSON.stringify(compactObject(bank)) : claim.banking_json,
     claim.client_id
   );
 
@@ -631,24 +826,23 @@ export async function processUploadedDocumentWithAi({ firmDb, uploadId }) {
     const filePath = resolveInside(clientUploadsDir, upload.stored_filename);
     const fileBuffer = fs.readFileSync(filePath);
     const templateFields = buildTemplateFieldPrompt(firmDb, claim.id);
-    const documentContent = await buildDocumentContent(upload, fileBuffer);
-    const openai = createOpenAI({ apiKey: config.openAiApiKey });
-    const { output } = await generateText({
-      model: openai(config.aiExtractionModel),
-      output: Output.object({
-        schema: extractedDocumentSchema,
-        name: 'raf_document_extraction',
-        description: 'Verified structured facts extracted from one RAF claim document'
-      }),
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: extractionInstructions({ request, claim, templateFields }) },
-          ...documentContent
-        ]
-      }],
-      timeout: { totalMs: 120000 }
-    });
+    const output = await generateDocumentExtractionWithOpenAi({ request, claim, templateFields, upload, fileBuffer });
+    const extractedClaimant = output.parties.find((party) => /claimant|client|patient|injured/i.test(party.role)) || output.parties[0] || {};
+    const identityMismatch = !personMatchesClaim(extractedClaimant, claim);
+    if (identityMismatch) {
+      output.warnings = [
+        ...(Array.isArray(output.warnings) ? output.warnings : []),
+        `Extracted person details do not match matter client ${claim.first_name} ${claim.surname}. Verify this upload before relying on it.`
+      ];
+      saveConsolidatedExtraction(firmDb, claim, upload, request, output);
+      const reviewMessage = `Extracted person details do not match matter client ${claim.first_name} ${claim.surname}. Staff review is required before using this document.`;
+      firmDb.prepare(`
+        UPDATE client_uploads
+        SET ai_status = 'review_required', ai_model = ?, ai_error = ?, ai_processed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(config.aiExtractionModel, reviewMessage, upload.id);
+      return { status: 'review_required', extraction: output, filledTemplates: 0, error: reviewMessage };
+    }
 
     updateRelevantClaimFields(firmDb, claim, output);
     saveConsolidatedExtraction(firmDb, claim, upload, request, output);
