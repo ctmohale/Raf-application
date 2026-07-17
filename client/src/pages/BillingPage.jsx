@@ -177,9 +177,8 @@ export default function BillingPage() {
                   <label>
                     Default rate
                     <input
-                      type="number"
-                      min="1"
-                      step="1"
+                      type="text"
+                      inputMode="decimal"
                       value={rateInput}
                       onChange={(event) => setRateInput(event.target.value)}
                     />
@@ -239,9 +238,8 @@ export default function BillingPage() {
                           {!isFirmBilling && (
                             <form className="firm-rate-control" onSubmit={(event) => updateFirmBillingRate(event, row)}>
                               <input
-                                type="number"
-                                min="1"
-                                step="1"
+                                type="text"
+                                inputMode="decimal"
                                 aria-label={`Rate for ${row.firm_name}`}
                                 value={firmRateInputs[row.firm_id] ?? String(row.rate_per_application)}
                                 onChange={(event) => setFirmRateInputs((current) => ({

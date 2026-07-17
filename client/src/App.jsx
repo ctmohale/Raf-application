@@ -21,6 +21,8 @@ import FirmDoctorsPage from './pages/FirmDoctorsPage.jsx';
 import FirmWorkspacePage from './pages/FirmWorkspacePage.jsx';
 import FirmTeamPage from './pages/FirmTeamPage.jsx';
 import MyMattersPage from './pages/MyMattersPage.jsx';
+import MatterDetailPage from './pages/MatterDetailPage.jsx';
+import RafClaimDetailPage from './pages/RafClaimDetailPage.jsx';
 
 function Protected({ children }) {
   const { isAuthenticated } = useAuth();
@@ -49,7 +51,10 @@ export default function App() {
       <Route path="/firms/:id/clients" element={<Protected><FirmClientsPage /></Protected>} />
       <Route path="/firms/:id/doctors" element={<Protected><FirmDoctorsPage /></Protected>} />
       <Route path="/firms/:id/claims" element={<Protected><FirmClaimsPage /></Protected>} />
+      <Route path="/firms/:id/claims/:caseId" element={<Protected><RafClaimDetailPage /></Protected>} />
       <Route path="/firms/:id/team" element={<Protected><FirmTeamPage /></Protected>} />
+      <Route path="/firms/:id/matters" element={<Protected><MyMattersPage /></Protected>} />
+      <Route path="/firms/:id/matters/:matterId" element={<Protected><MatterDetailPage /></Protected>} />
       <Route path="/firms/:id/my-matters" element={<Protected><MyMattersPage /></Protected>} />
       <Route path="/firms/:id/billing" element={<Protected><BillingPage /></Protected>} />
       <Route path="/firms/:id/templates" element={<Protected><FirmWorkspaceRedirect /></Protected>} />
@@ -58,7 +63,10 @@ export default function App() {
       <Route path="/firm/:id/clients" element={<Protected><FirmClientsPage /></Protected>} />
       <Route path="/firm/:id/doctors" element={<Protected><FirmDoctorsPage /></Protected>} />
       <Route path="/firm/:id/claims" element={<Protected><FirmClaimsPage /></Protected>} />
+      <Route path="/firm/:id/claims/:caseId" element={<Protected><RafClaimDetailPage /></Protected>} />
       <Route path="/firm/:id/team" element={<Protected><FirmTeamPage /></Protected>} />
+      <Route path="/firm/:id/matters" element={<Protected><MyMattersPage /></Protected>} />
+      <Route path="/firm/:id/matters/:matterId" element={<Protected><MatterDetailPage /></Protected>} />
       <Route path="/firm/:id/my-matters" element={<Protected><MyMattersPage /></Protected>} />
       <Route path="/firm/:id/billing" element={<Protected><BillingPage /></Protected>} />
       <Route path="/firm/:id/templates" element={<Protected><FirmWorkspaceRedirect /></Protected>} />

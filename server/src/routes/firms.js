@@ -55,7 +55,7 @@ function getFirmTeamMembers(firmId, firmDb = null) {
     assigned_matter_count: firmDb
       ? Number(firmDb.prepare(`
           SELECT COUNT(*) AS count
-          FROM raf_cases
+          FROM matters
           WHERE responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?
         `).get(member.id, member.id).count || 0)
       : 0
@@ -82,6 +82,17 @@ function addAssignmentNotification({ userId, firmId, caseId, message }) {
     INSERT INTO firm_user_notifications (user_id, firm_id, case_id, notification_type, message)
     VALUES (?, ?, ?, 'matter_assignment', ?)
   `).run(userId, firmId, caseId, message);
+}
+
+function matterStatusFromClaimStatus(status) {
+  if (status === 'closed' || status === 'finalised') return 'closed';
+  if (['submitted', 'ready_for_submission', 'ready_for_review'].includes(status)) return 'pending';
+  return 'open';
+}
+
+function parseArrayJson(value) {
+  const parsed = parseJson(value, []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 const clientUploadDocumentCondition = `
@@ -362,11 +373,15 @@ function getWorkspacePayload(firm, req) {
     const cases = firmDb.prepare(`
       SELECT
         raf_cases.*,
+        matters.matter_reference,
+        matters.matter_title,
+        matters.status AS matter_status,
         firm_clients.first_name,
         firm_clients.surname,
         COUNT(claim_form_templates.id) AS form_count
       FROM raf_cases
       JOIN firm_clients ON firm_clients.id = raf_cases.client_id
+      LEFT JOIN matters ON matters.id = raf_cases.matter_id
       LEFT JOIN claim_form_templates ON claim_form_templates.case_id = raf_cases.id
       GROUP BY raf_cases.id
       ORDER BY raf_cases.opened_at DESC
@@ -374,8 +389,12 @@ function getWorkspacePayload(firm, req) {
     `).all();
     const teamMembers = getFirmTeamMembers(firm.id, firmDb);
     const teamById = new Map(teamMembers.map((member) => [Number(member.id), member]));
+    const matters = getMatterRows(firmDb).map((matter) => serializeMatter(matter, teamById));
     const enrichedCases = cases.map((caseRecord) => ({
       ...caseRecord,
+      linked_matter: caseRecord.matter_id
+        ? matters.find((matter) => Number(matter.id) === Number(caseRecord.matter_id)) || null
+        : null,
       responsible_lawyer: teamById.get(Number(caseRecord.responsible_lawyer_user_id)) || null,
       assigned_assistant: teamById.get(Number(caseRecord.assigned_assistant_user_id)) || null
     }));
@@ -449,10 +468,18 @@ function getWorkspacePayload(firm, req) {
     `).all().map(serializeFirmDoctor);
 
     const canViewAllMatters = req.user?.role === 'admin' || req.firmAccess?.firm_role === 'firm_admin';
+    const visibleMatters = canViewAllMatters
+      ? matters
+      : matters.filter((matter) => (
+          Number(matter.responsible_lawyer_user_id) === Number(req.user?.id)
+          || Number(matter.assigned_assistant_user_id) === Number(req.user?.id)
+        ));
+    const visibleMatterIds = new Set(visibleMatters.map((matter) => Number(matter.id)));
     const visibleCases = canViewAllMatters
       ? enrichedCases
       : enrichedCases.filter((caseRecord) => (
-          Number(caseRecord.responsible_lawyer_user_id) === Number(req.user?.id)
+          visibleMatterIds.has(Number(caseRecord.matter_id))
+          || Number(caseRecord.responsible_lawyer_user_id) === Number(req.user?.id)
           || Number(caseRecord.assigned_assistant_user_id) === Number(req.user?.id)
         ));
     const visibleCaseIds = new Set(visibleCases.map((caseRecord) => Number(caseRecord.id)));
@@ -474,6 +501,7 @@ function getWorkspacePayload(firm, req) {
     const stats = {
       clients: firmDb.prepare('SELECT COUNT(*) AS count FROM firm_clients').get().count,
       openCases: firmDb.prepare("SELECT COUNT(*) AS count FROM raf_cases WHERE status != 'closed'").get().count,
+      openMatters: firmDb.prepare("SELECT COUNT(*) AS count FROM matters WHERE status != 'closed'").get().count,
       requestedDocuments: firmDb.prepare(`
         SELECT COUNT(*) AS count
         FROM client_document_requests
@@ -504,6 +532,7 @@ function getWorkspacePayload(firm, req) {
     if (!canViewAllMatters) {
       stats.clients = visibleClients.length;
       stats.openCases = visibleCases.filter((caseRecord) => caseRecord.status !== 'closed').length;
+      stats.openMatters = visibleMatters.filter((matter) => matter.status !== 'closed').length;
       stats.requestedDocuments = visibleDocumentRequests.filter((request) => (
         request.status !== 'uploaded' && Number(request.upload_count || 0) === 0
       )).length;
@@ -518,6 +547,7 @@ function getWorkspacePayload(firm, req) {
       firm: serializeFirm(firm),
       stats,
       clients: visibleClients,
+      matters: visibleMatters,
       cases: visibleCases,
       teamMembers,
       documentRequests: visibleDocumentRequests,
@@ -708,6 +738,95 @@ function serializeMedicalAssessmentRequest(row, clientOrigin = config.clientOrig
   };
 }
 
+function buildClaimWorkflowSummary(row = {}) {
+  const requested = Number(row.requested_documents || 0);
+  const uploaded = Number(row.uploaded_documents || 0);
+  const missing = Math.max(requested - uploaded, 0);
+  const readiness = requested ? Math.round((uploaded / requested) * 100) : 0;
+  const medicalStatus = row.medical_assessment_status || (Number(row.medical_assessment_count || 0) > 0 ? 'requested' : 'not_requested');
+  return {
+    claim_reference: row.case_reference || null,
+    claim_status: row.claim_status || 'draft',
+    readiness_percentage: readiness,
+    missing_documents_count: missing,
+    doctor_status: medicalStatus,
+    submission_status: row.status === 'submitted' ? 'submitted' : row.status === 'closed' ? 'finalised' : 'not_submitted'
+  };
+}
+
+function serializeMatter(row, teamById = new Map()) {
+  if (!row) return null;
+  const linkedClaim = row.linked_raf_case_id
+    ? buildClaimWorkflowSummary(row)
+    : null;
+
+  return {
+    id: row.id,
+    client_id: row.client_id,
+    matter_reference: row.matter_reference,
+    matter_title: row.matter_title,
+    matter_type: row.matter_type,
+    responsible_lawyer_user_id: row.responsible_lawyer_user_id,
+    assigned_assistant_user_id: row.assigned_assistant_user_id,
+    status: row.status,
+    priority: row.priority,
+    opened_at: row.opened_at,
+    deadline_json: row.deadline_json,
+    deadlines: parseArrayJson(row.deadline_json),
+    notes: row.notes || '',
+    tasks: parseArrayJson(row.tasks_json),
+    documents: parseArrayJson(row.documents_json),
+    linked_raf_case_id: row.linked_raf_case_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    first_name: row.first_name,
+    surname: row.surname,
+    client_name: [row.first_name, row.surname].filter(Boolean).join(' '),
+    responsible_lawyer: teamById.get(Number(row.responsible_lawyer_user_id)) || null,
+    assigned_assistant: teamById.get(Number(row.assigned_assistant_user_id)) || null,
+    linked_raf_claim: linkedClaim
+  };
+}
+
+function getMatterRows(firmDb) {
+  return firmDb.prepare(`
+    SELECT
+      matters.*,
+      firm_clients.first_name,
+      firm_clients.surname,
+      raf_cases.case_reference,
+      raf_cases.status AS claim_status,
+      (
+        SELECT COUNT(*) FROM client_document_requests
+        WHERE client_document_requests.case_id = raf_cases.id
+      ) AS requested_documents,
+      (
+        SELECT COUNT(*) FROM client_document_requests
+        WHERE client_document_requests.case_id = raf_cases.id
+          AND (
+            client_document_requests.status = 'uploaded'
+            OR EXISTS (
+              SELECT 1 FROM client_uploads
+              WHERE client_uploads.request_id = client_document_requests.id
+            )
+          )
+      ) AS uploaded_documents,
+      (
+        SELECT COUNT(*) FROM medical_assessment_requests
+        WHERE medical_assessment_requests.case_id = raf_cases.id
+      ) AS medical_assessment_count,
+      (
+        SELECT medical_assessment_requests.status FROM medical_assessment_requests
+        WHERE medical_assessment_requests.case_id = raf_cases.id
+        ORDER BY medical_assessment_requests.id DESC LIMIT 1
+      ) AS medical_assessment_status
+    FROM matters
+    JOIN firm_clients ON firm_clients.id = matters.client_id
+    LEFT JOIN raf_cases ON raf_cases.id = matters.linked_raf_case_id
+    ORDER BY matters.updated_at DESC, matters.opened_at DESC
+  `).all();
+}
+
 function getClaimFormAttachments(firmDb, caseId = null) {
   const rows = caseId
     ? firmDb.prepare('SELECT * FROM claim_form_templates WHERE case_id = ? ORDER BY created_at DESC, id DESC').all(caseId)
@@ -719,6 +838,11 @@ function getClaimWithClient(firmDb, caseId) {
   return firmDb.prepare(`
     SELECT
       raf_cases.*,
+      matters.matter_reference,
+      matters.matter_title,
+      matters.matter_type,
+      matters.status AS matter_status,
+      matters.priority AS matter_priority,
       firm_clients.first_name,
       firm_clients.surname,
       firm_clients.id_number,
@@ -734,6 +858,7 @@ function getClaimWithClient(firmDb, caseId) {
       firm_clients.created_at AS client_created_at
     FROM raf_cases
     JOIN firm_clients ON firm_clients.id = raf_cases.client_id
+    LEFT JOIN matters ON matters.id = raf_cases.matter_id
     WHERE raf_cases.id = ?
   `).get(caseId);
 }
@@ -999,12 +1124,26 @@ function requireAssignedMatter(options = {}) {
       let permitted = null;
       if (options.caseParam) {
         permitted = firmDb.prepare(`
-          SELECT id FROM raf_cases
+          SELECT raf_cases.id
+          FROM raf_cases
+          LEFT JOIN matters ON matters.id = raf_cases.matter_id
+          WHERE raf_cases.id = ?
+            AND (
+              matters.responsible_lawyer_user_id = ?
+              OR matters.assigned_assistant_user_id = ?
+              OR raf_cases.responsible_lawyer_user_id = ?
+              OR raf_cases.assigned_assistant_user_id = ?
+            )
+        `).get(req.params[options.caseParam], req.user.id, req.user.id, req.user.id, req.user.id);
+      } else if (options.matterParam) {
+        permitted = firmDb.prepare(`
+          SELECT id FROM matters
           WHERE id = ? AND (responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?)
-        `).get(req.params[options.caseParam], req.user.id, req.user.id);
+        `).get(req.params[options.matterParam], req.user.id, req.user.id);
       } else if (options.clientParam) {
         permitted = firmDb.prepare(`
-          SELECT id FROM raf_cases
+          SELECT matters.id
+          FROM matters
           WHERE client_id = ? AND (responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?)
           LIMIT 1
         `).get(req.params[options.clientParam], req.user.id, req.user.id);
@@ -1013,9 +1152,15 @@ function requireAssignedMatter(options = {}) {
           SELECT raf_cases.id
           FROM client_document_requests
           JOIN raf_cases ON raf_cases.id = client_document_requests.case_id
+          LEFT JOIN matters ON matters.id = raf_cases.matter_id
           WHERE client_document_requests.id = ?
-            AND (raf_cases.responsible_lawyer_user_id = ? OR raf_cases.assigned_assistant_user_id = ?)
-        `).get(req.params[options.requestParam], req.user.id, req.user.id);
+            AND (
+              matters.responsible_lawyer_user_id = ?
+              OR matters.assigned_assistant_user_id = ?
+              OR raf_cases.responsible_lawyer_user_id = ?
+              OR raf_cases.assigned_assistant_user_id = ?
+            )
+        `).get(req.params[options.requestParam], req.user.id, req.user.id, req.user.id, req.user.id);
       }
       if (!permitted) return res.status(403).json({ error: 'This matter is not assigned to you' });
       return next();
@@ -1357,25 +1502,19 @@ firmsRouter.patch('/:id/team/:userId', requireFirmAccess({ write: true }), (req,
   }
 });
 
-firmsRouter.get('/:id/my-matters', requireFirmAccess(), (req, res) => {
-  const firm = req.firm;
+function getVisibleMattersPayload(firm, req) {
   const firmDb = openFirmDatabase(firm);
   try {
     const teamMembers = getFirmTeamMembers(firm.id, firmDb);
     const teamById = new Map(teamMembers.map((member) => [Number(member.id), member]));
-    const matters = firmDb.prepare(`
-      SELECT raf_cases.*, firm_clients.first_name, firm_clients.surname,
-        (SELECT COUNT(*) FROM client_document_requests WHERE case_id = raf_cases.id) AS requested_documents,
-        (SELECT COUNT(*) FROM client_document_requests WHERE case_id = raf_cases.id AND status = 'uploaded') AS uploaded_documents
-      FROM raf_cases
-      JOIN firm_clients ON firm_clients.id = raf_cases.client_id
-      WHERE raf_cases.responsible_lawyer_user_id = ? OR raf_cases.assigned_assistant_user_id = ?
-      ORDER BY raf_cases.updated_at DESC, raf_cases.opened_at DESC
-    `).all(req.user.id, req.user.id).map((matter) => ({
-      ...matter,
-      responsible_lawyer: teamById.get(Number(matter.responsible_lawyer_user_id)) || null,
-      assigned_assistant: teamById.get(Number(matter.assigned_assistant_user_id)) || null
-    }));
+    const canViewAllMatters = req.user?.role === 'admin' || req.firmAccess?.firm_role === 'firm_admin';
+    const matters = getMatterRows(firmDb)
+      .map((matter) => serializeMatter(matter, teamById))
+      .filter((matter) => (
+        canViewAllMatters
+        || Number(matter.responsible_lawyer_user_id) === Number(req.user?.id)
+        || Number(matter.assigned_assistant_user_id) === Number(req.user?.id)
+      ));
     const notifications = db.prepare(`
       SELECT * FROM firm_user_notifications
       WHERE user_id = ? AND firm_id = ? AND notification_type = 'matter_assignment'
@@ -1386,7 +1525,129 @@ firmsRouter.get('/:id/my-matters', requireFirmAccess(), (req, res) => {
       UPDATE firm_user_notifications SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
       WHERE user_id = ? AND firm_id = ? AND notification_type = 'matter_assignment'
     `).run(req.user.id, firm.id);
-    return res.json({ firm: serializeFirm(firm), matters, teamMembers, notifications });
+
+    return {
+      firm: serializeFirm(firm),
+      current_user_id: req.user?.id,
+      matters,
+      teamMembers,
+      notifications,
+      permissions: {
+        can_manage_team: canViewAllMatters,
+        can_view_all_matters: canViewAllMatters
+      }
+    };
+  } finally {
+    firmDb.close();
+  }
+}
+
+firmsRouter.get('/:id/matters', requireFirmAccess(), (req, res) => {
+  return res.json(getVisibleMattersPayload(req.firm, req));
+});
+
+firmsRouter.get('/:id/my-matters', requireFirmAccess(), (req, res) => {
+  return res.json(getVisibleMattersPayload(req.firm, req));
+});
+
+firmsRouter.get('/:id/matters/:matterId', requireFirmAccess(), requireAssignedMatter({ matterParam: 'matterId' }), (req, res) => {
+  const firm = req.firm;
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const teamMembers = getFirmTeamMembers(firm.id, firmDb);
+    const teamById = new Map(teamMembers.map((member) => [Number(member.id), member]));
+    const row = getMatterRows(firmDb).find((matter) => Number(matter.id) === Number(req.params.matterId));
+    if (!row) return res.status(404).json({ error: 'Matter not found' });
+    const matter = serializeMatter(row, teamById);
+    const claim = matter.linked_raf_case_id ? getClaimWithClient(firmDb, matter.linked_raf_case_id) : null;
+    return res.json({
+      firm: serializeFirm(firm),
+      matter,
+      linked_claim: claim ? {
+        id: claim.id,
+        case_reference: claim.case_reference,
+        status: claim.status,
+        accident_date: claim.accident_date,
+        matter_id: claim.matter_id
+      } : null,
+      activity_history: firmDb.prepare(`
+        SELECT * FROM matter_assignment_history
+        WHERE matter_id = ? OR case_id = ?
+        ORDER BY created_at DESC, id DESC
+      `).all(matter.id, matter.linked_raf_case_id || 0)
+    });
+  } finally {
+    firmDb.close();
+  }
+});
+
+firmsRouter.patch('/:id/matters/:matterId/assignment', requireFirmAccess({ write: true }), (req, res) => {
+  const firm = req.firm;
+  if (!canManageFirmTeam(req)) return res.status(403).json({ error: 'Firm Admin access is required to assign matters' });
+
+  const lawyerId = Number(req.body?.responsible_lawyer_user_id || 0) || null;
+  const assistantId = Number(req.body?.assigned_assistant_user_id || 0) || null;
+  const assignmentNote = cleanString(req.body?.assignment_note);
+  const reason = cleanString(req.body?.reason);
+  if (!lawyerId) return res.status(400).json({ error: 'Choose a responsible lawyer' });
+
+  const lawyer = getFirmMember(firm.id, lawyerId);
+  const assistant = assistantId ? getFirmMember(firm.id, assistantId) : null;
+  if (!lawyer || lawyer.status !== 'active' || !['lawyer', 'firm_admin'].includes(lawyer.firm_role)) {
+    return res.status(400).json({ error: 'Choose an active lawyer from this firm' });
+  }
+  if (assistantId && (!assistant || assistant.status !== 'active' || assistant.firm_role !== 'assistant')) {
+    return res.status(400).json({ error: 'Choose an active assistant from this firm' });
+  }
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const matter = firmDb.prepare('SELECT * FROM matters WHERE id = ?').get(req.params.matterId);
+    if (!matter) return res.status(404).json({ error: 'Matter not found' });
+    const isReassignment = Boolean(matter.responsible_lawyer_user_id || matter.assigned_assistant_user_id);
+    const changed = Number(matter.responsible_lawyer_user_id || 0) !== Number(lawyerId || 0)
+      || Number(matter.assigned_assistant_user_id || 0) !== Number(assistantId || 0);
+    if (!changed) return res.status(400).json({ error: 'Choose a different lawyer or assistant to reassign this matter' });
+    if (isReassignment && !reason) return res.status(400).json({ error: 'Add a reason for reassignment' });
+
+    const assignMatter = firmDb.transaction(() => {
+      firmDb.prepare(`
+        UPDATE matters
+        SET responsible_lawyer_user_id = ?, assigned_assistant_user_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(lawyerId, assistantId, matter.id);
+      if (matter.linked_raf_case_id) {
+        firmDb.prepare(`
+          UPDATE raf_cases
+          SET responsible_lawyer_user_id = ?, assigned_assistant_user_id = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(lawyerId, assistantId, matter.linked_raf_case_id);
+      }
+      firmDb.prepare(`
+        INSERT INTO matter_assignment_history
+          (matter_id, case_id, previous_lawyer_user_id, previous_assistant_user_id,
+           responsible_lawyer_user_id, assigned_assistant_user_id, assigned_by_user_id,
+           assignment_note, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        matter.id,
+        matter.linked_raf_case_id || null,
+        matter.responsible_lawyer_user_id || null,
+        matter.assigned_assistant_user_id || null,
+        lawyerId,
+        assistantId,
+        req.user.id,
+        assignmentNote || null,
+        reason || null
+      );
+    });
+    assignMatter();
+
+    const action = isReassignment ? 'reassigned' : 'assigned';
+    addAssignmentNotification({ userId: lawyerId, firmId: firm.id, caseId: matter.linked_raf_case_id || null, message: `${matter.matter_reference} was ${action} to you as responsible lawyer.` });
+    if (assistantId) addAssignmentNotification({ userId: assistantId, firmId: firm.id, caseId: matter.linked_raf_case_id || null, message: `${matter.matter_reference} was ${action} to you as assigned assistant.` });
+
+    return res.json(getVisibleMattersPayload(firm, req));
   } finally {
     firmDb.close();
   }
@@ -1412,15 +1673,29 @@ firmsRouter.patch('/:id/claims/:caseId/assignment', requireFirmAccess({ write: t
 
   const firmDb = openFirmDatabase(firm);
   try {
-    const claim = firmDb.prepare('SELECT * FROM raf_cases WHERE id = ?').get(req.params.caseId);
+    const claim = firmDb.prepare(`
+      SELECT raf_cases.*, matters.id AS linked_matter_id,
+        matters.responsible_lawyer_user_id AS matter_lawyer_user_id,
+        matters.assigned_assistant_user_id AS matter_assistant_user_id
+      FROM raf_cases
+      LEFT JOIN matters ON matters.id = raf_cases.matter_id
+      WHERE raf_cases.id = ?
+    `).get(req.params.caseId);
     if (!claim) return res.status(404).json({ error: 'Matter not found' });
-    const isReassignment = Boolean(claim.responsible_lawyer_user_id || claim.assigned_assistant_user_id);
-    const changed = Number(claim.responsible_lawyer_user_id || 0) !== Number(lawyerId || 0)
-      || Number(claim.assigned_assistant_user_id || 0) !== Number(assistantId || 0);
+    const currentLawyerId = claim.matter_lawyer_user_id || claim.responsible_lawyer_user_id;
+    const currentAssistantId = claim.matter_assistant_user_id || claim.assigned_assistant_user_id;
+    const isReassignment = Boolean(currentLawyerId || currentAssistantId);
+    const changed = Number(currentLawyerId || 0) !== Number(lawyerId || 0)
+      || Number(currentAssistantId || 0) !== Number(assistantId || 0);
     if (!changed) return res.status(400).json({ error: 'Choose a different lawyer or assistant to reassign this matter' });
     if (isReassignment && !reason) return res.status(400).json({ error: 'Add a reason for reassignment' });
 
     const assignMatter = firmDb.transaction(() => {
+      firmDb.prepare(`
+        UPDATE matters
+        SET responsible_lawyer_user_id = ?, assigned_assistant_user_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(lawyerId, assistantId, claim.linked_matter_id || claim.matter_id);
       firmDb.prepare(`
         UPDATE raf_cases
         SET responsible_lawyer_user_id = ?, assigned_assistant_user_id = ?, updated_at = CURRENT_TIMESTAMP
@@ -1428,14 +1703,15 @@ firmsRouter.patch('/:id/claims/:caseId/assignment', requireFirmAccess({ write: t
       `).run(lawyerId, assistantId, claim.id);
       firmDb.prepare(`
         INSERT INTO matter_assignment_history
-          (case_id, previous_lawyer_user_id, previous_assistant_user_id,
+          (matter_id, case_id, previous_lawyer_user_id, previous_assistant_user_id,
            responsible_lawyer_user_id, assigned_assistant_user_id, assigned_by_user_id,
            assignment_note, reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
+        claim.linked_matter_id || claim.matter_id || null,
         claim.id,
-        claim.responsible_lawyer_user_id || null,
-        claim.assigned_assistant_user_id || null,
+        currentLawyerId || null,
+        currentAssistantId || null,
         lawyerId,
         assistantId,
         req.user.id,
@@ -1876,6 +2152,92 @@ firmsRouter.post('/:id/claims/:caseId/forms', requireFirmAccess({ write: true })
   }
 });
 
+firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/ai-suggestions', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), async (req, res, next) => {
+  const firm = getFirmOr404(req.params.id, res);
+  if (!firm) return;
+
+  const firmDb = openFirmDatabase(firm);
+  try {
+    const claim = getClaimWithClient(firmDb, req.params.caseId);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+
+    const attachment = firmDb.prepare('SELECT * FROM claim_form_templates WHERE id = ? AND case_id = ?')
+      .get(req.params.attachmentId, claim.id);
+    if (!attachment) return res.status(404).json({ error: 'Attached template form not found' });
+
+    const template = db.prepare('SELECT * FROM document_templates WHERE id = ? AND status = ?')
+      .get(attachment.template_id, 'ready');
+    if (!template) return res.status(404).json({ error: 'Template is not ready or was not found' });
+
+    const pendingUploads = firmDb.prepare(`
+      SELECT client_uploads.id
+      FROM client_uploads
+      JOIN client_document_requests ON client_document_requests.id = client_uploads.request_id
+      WHERE client_document_requests.case_id = ?
+        AND COALESCE(client_uploads.ai_status, 'pending') != 'completed'
+      ORDER BY client_uploads.id
+    `).all(claim.id);
+    const scannedDocuments = [];
+    for (const upload of pendingUploads) {
+      const result = await processUploadedDocumentWithAi({ firmDb, uploadId: upload.id });
+      scannedDocuments.push({
+        upload_id: upload.id,
+        status: result.status,
+        error: result.error || null
+      });
+    }
+
+    const refreshedClaim = getClaimWithClient(firmDb, claim.id);
+    const fields = getTemplateFields(template.id).map(serializeField);
+    const currentData = req.body?.data && typeof req.body.data === 'object' ? req.body.data : {};
+    const generatedData = buildClaimTemplateData({ firm, claim: refreshedClaim, fields });
+    const mergedData = mergeManualValues(generatedData, currentData);
+    const emptyFields = fields.filter((field) => !hasManualValue(currentData[field.name]));
+    const mappedSuggestions = emptyFields
+      .filter((field) => hasManualValue(mergedData[field.name]))
+      .map((field) => ({
+        field_name: field.name,
+        label: readableFieldLabel(field, fields),
+        status: 'fillable',
+        value: mergedData[field.name],
+        source: 'Claim record or extracted document',
+        reason: 'Matched to an existing verified record value.',
+        confidence: 1
+      }));
+    const aiReview = await reviewMissingTemplateFieldsWithAi({
+      claim: refreshedClaim,
+      firm,
+      fields,
+      data: mergedData
+    });
+    const decisionsByField = new Map();
+    for (const decision of [...mappedSuggestions, ...aiReview.decisions]) {
+      if (!decisionsByField.has(decision.field_name) || decision.status === 'fillable') {
+        decisionsByField.set(decision.field_name, decision);
+      }
+    }
+    const decisions = [...decisionsByField.values()];
+    const suggestions = decisions.filter((decision) => (
+      decision.status === 'fillable' && hasManualValue(decision.value)
+    ));
+
+    return res.json({
+      model: config.aiExtractionModel,
+      scanned_documents: scannedDocuments,
+      fields_checked: emptyFields.length,
+      suggestions,
+      decisions,
+      no_evidence_count: decisions.filter((decision) => decision.status === 'no_evidence').length,
+      review_required_count: decisions.filter((decision) => ['conflict', 'review_failed'].includes(decision.status)).length,
+      error: aiReview.error || null
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    firmDb.close();
+  }
+});
+
 firmsRouter.post('/:id/claims/:caseId/forms/:attachmentId/fill-ai', requireFirmAccess({ write: true }), requireAssignedMatter({ caseParam: 'caseId' }), async (req, res, next) => {
   const firm = getFirmOr404(req.params.id, res);
   if (!firm) return;
@@ -1958,10 +2320,15 @@ function getAiAccessibleClaims(firmDb, req) {
   return canProcessAll
     ? firmDb.prepare('SELECT id FROM raf_cases ORDER BY id').all()
     : firmDb.prepare(`
-        SELECT id FROM raf_cases
-        WHERE responsible_lawyer_user_id = ? OR assigned_assistant_user_id = ?
-        ORDER BY id
-      `).all(req.user.id, req.user.id);
+        SELECT raf_cases.id
+        FROM raf_cases
+        LEFT JOIN matters ON matters.id = raf_cases.matter_id
+        WHERE matters.responsible_lawyer_user_id = ?
+          OR matters.assigned_assistant_user_id = ?
+          OR raf_cases.responsible_lawyer_user_id = ?
+          OR raf_cases.assigned_assistant_user_id = ?
+        ORDER BY raf_cases.id
+      `).all(req.user.id, req.user.id, req.user.id, req.user.id);
 }
 
 function scopeAiClaims(claims, requestedCaseId) {
@@ -2378,19 +2745,41 @@ firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) 
       );
 
       const clientId = clientResult.lastInsertRowid;
+      const matterReference = `MAT-${firm.slug.toUpperCase()}-${String(clientId).padStart(4, '0')}`;
+      const matterTitle = `${resolvedSurname} v Road Accident Fund`;
+      const matterResult = firmDb.prepare(`
+        INSERT INTO matters (
+          client_id, matter_reference, matter_title, matter_type,
+          responsible_lawyer_user_id, assigned_assistant_user_id,
+          status, priority, opened_at, deadline_json, notes, tasks_json, documents_json
+        )
+        VALUES (?, ?, ?, 'RAF matter', ?, ?, 'open', 'normal', CURRENT_TIMESTAMP, ?, '', '[]', '[]')
+      `).run(
+        clientId,
+        matterReference,
+        matterTitle,
+        responsibleLawyerUserId,
+        assignedAssistantUserId,
+        JSON.stringify([
+          deadlineData.internal_deadline ? { label: 'Internal deadline', date: deadlineData.internal_deadline } : null,
+          deadlineData.lodgement_deadline ? { label: 'RAF lodgement deadline', date: deadlineData.lodgement_deadline } : null
+        ].filter(Boolean))
+      );
+
       const caseReference = `RAF-${firm.slug.toUpperCase()}-${String(clientId).padStart(4, '0')}`;
       const caseResult = firmDb.prepare(`
         INSERT INTO raf_cases (
-          client_id, case_reference, accident_date, accident_time, accident_location,
+          client_id, matter_id, case_reference, accident_date, accident_time, accident_location,
           police_station, police_case_number, claimant_role, collision_description,
           vehicle_json, driver_json, owner_json, witnesses_json, claim_amounts_json,
           statutory_form_set, required_forms_json, lodgement_deadline, internal_deadline,
           deadline_status, lawyer_review_status, original_tracking_json,
           responsible_lawyer_user_id, assigned_assistant_user_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         clientId,
+        matterResult.lastInsertRowid,
         caseReference,
         cleanString(accidentDate) || null,
         cleanString(accidentTime),
@@ -2425,13 +2814,20 @@ firmsRouter.post('/:id/clients', requireFirmAccess({ write: true }), (req, res) 
         assignedAssistantUserId
       );
 
+      firmDb.prepare(`
+        UPDATE matters
+        SET linked_raf_case_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(caseResult.lastInsertRowid, matterResult.lastInsertRowid);
+
       if (responsibleLawyerUserId) {
         firmDb.prepare(`
           INSERT INTO matter_assignment_history
-            (case_id, responsible_lawyer_user_id, assigned_assistant_user_id,
+            (matter_id, case_id, responsible_lawyer_user_id, assigned_assistant_user_id,
              assigned_by_user_id, assignment_note)
-          VALUES (?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?)
         `).run(
+          matterResult.lastInsertRowid,
           caseResult.lastInsertRowid,
           responsibleLawyerUserId,
           assignedAssistantUserId,

@@ -153,6 +153,7 @@ export function initializeFirmDatabase(firm) {
       CREATE TABLE IF NOT EXISTS raf_cases (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         client_id INTEGER NOT NULL,
+        matter_id INTEGER,
         case_reference TEXT NOT NULL UNIQUE,
         claim_type TEXT NOT NULL DEFAULT 'RAF claim',
         accident_date TEXT,
@@ -160,6 +161,28 @@ export function initializeFirmDatabase(firm) {
         opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (client_id) REFERENCES firm_clients(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS matters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER NOT NULL,
+        matter_reference TEXT NOT NULL UNIQUE,
+        matter_title TEXT NOT NULL,
+        matter_type TEXT NOT NULL DEFAULT 'RAF matter',
+        responsible_lawyer_user_id INTEGER,
+        assigned_assistant_user_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'open',
+        priority TEXT NOT NULL DEFAULT 'normal',
+        opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        deadline_json TEXT,
+        notes TEXT,
+        tasks_json TEXT,
+        documents_json TEXT,
+        linked_raf_case_id INTEGER UNIQUE,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (client_id) REFERENCES firm_clients(id) ON DELETE CASCADE,
+        FOREIGN KEY (linked_raf_case_id) REFERENCES raf_cases(id) ON DELETE SET NULL
       );
 
       CREATE TABLE IF NOT EXISTS client_document_requests (
@@ -252,6 +275,7 @@ export function initializeFirmDatabase(firm) {
 
       CREATE TABLE IF NOT EXISTS matter_assignment_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        matter_id INTEGER,
         case_id INTEGER NOT NULL,
         previous_lawyer_user_id INTEGER,
         previous_assistant_user_id INTEGER,
@@ -276,6 +300,9 @@ export function initializeFirmDatabase(firm) {
       CREATE INDEX IF NOT EXISTS idx_clients_email ON firm_clients(email);
       CREATE INDEX IF NOT EXISTS idx_clients_invite_token ON firm_clients(invite_token);
       CREATE INDEX IF NOT EXISTS idx_cases_client ON raf_cases(client_id);
+      CREATE INDEX IF NOT EXISTS idx_matters_client ON matters(client_id);
+      CREATE INDEX IF NOT EXISTS idx_matters_lawyer ON matters(responsible_lawyer_user_id);
+      CREATE INDEX IF NOT EXISTS idx_matters_assistant ON matters(assigned_assistant_user_id);
       CREATE INDEX IF NOT EXISTS idx_doc_requests_client ON client_document_requests(client_id);
       CREATE INDEX IF NOT EXISTS idx_uploads_client ON client_uploads(client_id);
       CREATE INDEX IF NOT EXISTS idx_email_logs_client ON client_email_logs(client_id);
@@ -344,9 +371,24 @@ export function initializeFirmDatabase(firm) {
     addCaseColumn('original_tracking_json', 'TEXT');
     addCaseColumn('responsible_lawyer_user_id', 'INTEGER');
     addCaseColumn('assigned_assistant_user_id', 'INTEGER');
+    addCaseColumn('matter_id', 'INTEGER');
     addCaseColumn('ai_structured_json', 'TEXT');
     addCaseColumn('ai_summary', 'TEXT');
     addCaseColumn('ai_updated_at', 'TEXT');
+    firmDb.prepare('CREATE INDEX IF NOT EXISTS idx_cases_matter ON raf_cases(matter_id)').run();
+
+    const matterColumns = firmDb.prepare('PRAGMA table_info(matters)').all().map((column) => column.name);
+    const addMatterColumn = (name, definition) => {
+      if (!matterColumns.includes(name)) {
+        firmDb.prepare(`ALTER TABLE matters ADD COLUMN ${name} ${definition}`).run();
+      }
+    };
+
+    addMatterColumn('deadline_json', 'TEXT');
+    addMatterColumn('notes', 'TEXT');
+    addMatterColumn('tasks_json', 'TEXT');
+    addMatterColumn('documents_json', 'TEXT');
+    addMatterColumn('linked_raf_case_id', 'INTEGER');
 
     const uploadColumns = firmDb.prepare('PRAGMA table_info(client_uploads)').all().map((column) => column.name);
     const addUploadColumn = (name, definition) => {
@@ -378,6 +420,11 @@ export function initializeFirmDatabase(firm) {
     const documentRequestColumns = firmDb.prepare('PRAGMA table_info(client_document_requests)').all().map((column) => column.name);
     if (!documentRequestColumns.includes('instructions')) {
       firmDb.prepare('ALTER TABLE client_document_requests ADD COLUMN instructions TEXT').run();
+    }
+
+    const assignmentHistoryColumns = firmDb.prepare('PRAGMA table_info(matter_assignment_history)').all().map((column) => column.name);
+    if (!assignmentHistoryColumns.includes('matter_id')) {
+      firmDb.prepare('ALTER TABLE matter_assignment_history ADD COLUMN matter_id INTEGER').run();
     }
 
     const coreDocumentRequestMigration = 'limit-client-document-requests-to-four-v1';
@@ -487,6 +534,72 @@ export function initializeFirmDatabase(firm) {
           .run(shortDocumentGuidanceMigration);
       });
       migrateShortGuidance();
+    }
+
+    const mattersSplitMigration = 'split-matters-from-raf-claims-v1';
+    const mattersSplitApplied = firmDb.prepare(
+      'SELECT 1 FROM firm_schema_migrations WHERE name = ?'
+    ).get(mattersSplitMigration);
+
+    if (!mattersSplitApplied) {
+      const migrateMatters = firmDb.transaction(() => {
+        const claims = firmDb.prepare(`
+          SELECT raf_cases.*, firm_clients.first_name, firm_clients.surname
+          FROM raf_cases
+          JOIN firm_clients ON firm_clients.id = raf_cases.client_id
+          ORDER BY raf_cases.id
+        `).all();
+        const insertMatter = firmDb.prepare(`
+          INSERT INTO matters
+            (
+              client_id, matter_reference, matter_title, matter_type,
+              responsible_lawyer_user_id, assigned_assistant_user_id,
+              status, priority, opened_at, deadline_json, notes,
+              tasks_json, documents_json, linked_raf_case_id
+            )
+          VALUES (?, ?, ?, 'RAF matter', ?, ?, ?, 'normal', ?, ?, '', '[]', '[]', ?)
+        `);
+        const updateClaimMatter = firmDb.prepare(`
+          UPDATE raf_cases
+          SET matter_id = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `);
+
+        for (const claim of claims) {
+          if (claim.matter_id) continue;
+          const matterReference = `MAT-${String(claim.id).padStart(5, '0')}`;
+          const matterTitle = `${claim.surname || 'Client'} v Road Accident Fund`;
+          const matterStatus = claim.status === 'closed' ? 'closed' : claim.status === 'submitted' ? 'pending' : 'open';
+          const deadlineJson = JSON.stringify([
+            claim.internal_deadline ? { label: 'Internal deadline', date: claim.internal_deadline } : null,
+            claim.lodgement_deadline ? { label: 'RAF lodgement deadline', date: claim.lodgement_deadline } : null
+          ].filter(Boolean));
+          const result = insertMatter.run(
+            claim.client_id,
+            matterReference,
+            matterTitle,
+            claim.responsible_lawyer_user_id || null,
+            claim.assigned_assistant_user_id || null,
+            matterStatus,
+            claim.opened_at || new Date().toISOString(),
+            deadlineJson,
+            claim.id
+          );
+          updateClaimMatter.run(result.lastInsertRowid, claim.id);
+        }
+        firmDb.prepare(`
+          UPDATE matter_assignment_history
+          SET matter_id = (
+            SELECT raf_cases.matter_id
+            FROM raf_cases
+            WHERE raf_cases.id = matter_assignment_history.case_id
+          )
+          WHERE matter_id IS NULL
+        `).run();
+        firmDb.prepare('INSERT INTO firm_schema_migrations (name) VALUES (?)')
+          .run(mattersSplitMigration);
+      });
+      migrateMatters();
     }
 
     firmDb.exec(`

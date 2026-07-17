@@ -4,6 +4,7 @@ import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Plus } from 'lucide-react';
 import { LoadingSpinner } from './LoadingSpinner.jsx';
 import { apiBinary } from '../lib/api.js';
+import { normalizeDateInputValue } from '../lib/templateFieldHelpers.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -201,11 +202,11 @@ function entryValueForField(field, values) {
 }
 
 function entryInputProps(field) {
+  if (field.field_type === 'date') return { type: 'date' };
   if (field.field_type !== 'number') return { type: 'text' };
   return {
     type: 'text',
-    inputMode: 'numeric',
-    pattern: '[0-9]*'
+    inputMode: 'decimal'
   };
 }
 
@@ -245,13 +246,20 @@ function useContainerWidth(ref) {
   const [width, setWidth] = useState(0);
   useEffect(() => {
     if (!ref.current) return undefined;
-    const updateWidth = () => setWidth(ref.current?.clientWidth || 0);
+    const updateWidth = () => {
+      const node = ref.current;
+      if (!node) return;
+      const styles = window.getComputedStyle(node);
+      const paddingX = Number.parseFloat(styles.paddingLeft || '0') + Number.parseFloat(styles.paddingRight || '0');
+      const nextWidth = Math.max(1, (node.clientWidth || 0) - paddingX);
+      setWidth((current) => (Math.abs(current - nextWidth) < 1 ? current : nextWidth));
+    };
     updateWidth();
     const observer = new ResizeObserver(updateWidth);
     observer.observe(ref.current);
     return () => observer.disconnect();
-  }, [ref]);
-  return width || 920;
+  });
+  return width;
 }
 
 function PdfPage({
@@ -275,21 +283,26 @@ function PdfPage({
   values,
   minScale,
   fitPadding,
-  zoom
+  zoom,
+  fitToPageWidth
 }) {
   const canvasRef = useRef(null);
   const [textItems, setTextItems] = useState([]);
   const [selectedTextKey, setSelectedTextKey] = useState('');
   const pageFields = useMemo(() => fields.filter((field) => field.page_number === pageNumber), [fields, pageNumber]);
-  const effectiveWidth = useMemo(() => Math.max(
-    width,
-    ...pageFields.map((field) => Number(field.x || 0) + Number(field.width || 0) + 4)
-  ), [pageFields, width]);
+  const effectiveWidth = useMemo(() => (
+    fitToPageWidth
+      ? width
+      : Math.max(
+          width,
+          ...pageFields.map((field) => Number(field.x || 0) + Number(field.width || 0) + 4)
+        )
+  ), [fitToPageWidth, pageFields, width]);
   const scale = useMemo(() => {
-    const availableWidth = Math.max(1, containerWidth - fitPadding);
+    const availableWidth = Math.max(1, containerWidth - fitPadding - (fitToPageWidth ? 4 : 0));
     const baseScale = clamp(availableWidth / effectiveWidth, minScale, 1.35);
     return clamp(baseScale * zoom, minScale * 0.75, 2.4);
-  }, [containerWidth, effectiveWidth, fitPadding, minScale, zoom]);
+  }, [containerWidth, effectiveWidth, fitPadding, fitToPageWidth, minScale, zoom]);
   const textPickMode = !entryMode && !readOnly && ['select', 'text', 'section'].includes(mode);
 
   useEffect(() => {
@@ -525,7 +538,9 @@ function PdfPage({
           const multiSelected = multiSelectedFieldIds.includes(field.id);
           const hidden = Boolean(field.hidden);
           const rawValue = getFieldValue(field, values);
-          const entryValue = entryValueForField(field, values);
+          const entryValue = field.field_type === 'date'
+            ? normalizeDateInputValue(entryValueForField(field, values))
+            : entryValueForField(field, values);
           const previewValue = formatPreviewValue(rawValue);
           const hasValue = previewValue.length > 0;
           const fieldLabel = field.aria_label || field.label;
@@ -702,13 +717,15 @@ export default function PdfWorkspace({
   values = {},
   minScale = 0.65,
   fitPadding = 36,
-  zoom = 1
+  zoom = 1,
+  fitToPageWidth = false
 }) {
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const wrapRef = useRef(null);
   const containerWidth = useContainerWidth(wrapRef);
+  const measuredContainerWidth = containerWidth || (fitToPageWidth ? 320 : 920);
 
   useEffect(() => {
     let cancelled = false;
@@ -737,16 +754,15 @@ export default function PdfWorkspace({
     };
   }, [pdfPath]);
 
-  if (loading) return <div className="pdf-loading" role="status" aria-live="polite"><LoadingSpinner size="lg" label="Loading PDF..." /> <span>Loading PDF...</span></div>;
-  if (error) return <div className="pdf-loading error">{error}</div>;
-
   return (
     <div className={`pdf-workspace ${className}`.trim()} ref={wrapRef}>
-      {pages.map((page) => (
+      {loading && <div className="pdf-loading" role="status" aria-live="polite"><LoadingSpinner size="lg" label="Loading PDF..." /> <span>Loading PDF...</span></div>}
+      {!loading && error && <div className="pdf-loading error">{error}</div>}
+      {!loading && !error && pages.map((page) => (
         <PdfPage
           key={page.pageNumber}
           {...page}
-          containerWidth={containerWidth}
+          containerWidth={measuredContainerWidth}
           fields={fields}
           onFieldsChange={onFieldsChange}
           selectedFieldId={selectedFieldId}
@@ -763,6 +779,7 @@ export default function PdfWorkspace({
           minScale={minScale}
           fitPadding={fitPadding}
           zoom={zoom}
+          fitToPageWidth={fitToPageWidth}
         />
       ))}
     </div>

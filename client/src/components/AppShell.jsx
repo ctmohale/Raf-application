@@ -316,9 +316,9 @@ export default function AppShell({ children }) {
                 <NavLink to={`${firmBasePath}/workspace`}><Home size={18} /> Dashboard</NavLink>
                 <NavLink to={`${firmBasePath}/clients`}><Users size={18} /> Clients</NavLink>
                 <NavLink to={`${firmBasePath}/team`}><Users size={18} /> Team Members</NavLink>
-                <NavLink to={`${firmBasePath}/my-matters`}><BriefcaseBusiness size={18} /> My Matters</NavLink>
+                <NavLink to={`${firmBasePath}/matters`}><BriefcaseBusiness size={18} /> Matters</NavLink>
+                <NavLink to={`${firmBasePath}/claims`}><FileText size={18} /> RAF Claims</NavLink>
                 <NavLink to={`${firmBasePath}/doctors`}><Stethoscope size={18} /> Doctors</NavLink>
-                <NavLink to={`${firmBasePath}/claims`}><BriefcaseBusiness size={18} /> Claims</NavLink>
                 <NavLink to={`${firmBasePath}/billing`}><Banknote size={18} /> Billing</NavLink>
               </>
             ) : (

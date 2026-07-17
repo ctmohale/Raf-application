@@ -36,15 +36,20 @@ export default function DocumentPreviewPage() {
           <button className="primary-button" onClick={() => downloadDocument(document.id, document.file_name)}><Download size={16} /> Download PDF</button>
         </div>
       </div>
-      <PdfWorkspace
-        pdfPath={`/api/documents/${id}/download?inline=1`}
-        fields={fields}
-        onFieldsChange={() => {}}
-        selectedFieldId={null}
-        onSelectField={() => {}}
-        readOnly
-        values={document.input}
-      />
+      <div className="claim-form-live-preview document-preview-workspace">
+        <PdfWorkspace
+          pdfPath={`/api/documents/${id}/download?inline=1`}
+          fields={fields}
+          onFieldsChange={() => {}}
+          selectedFieldId={null}
+          onSelectField={() => {}}
+          readOnly
+          values={document.input}
+          minScale={0.25}
+          fitPadding={0}
+          fitToPageWidth
+        />
+      </div>
     </section>
   );
 }

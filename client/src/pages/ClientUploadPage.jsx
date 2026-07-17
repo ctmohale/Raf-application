@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, ChevronDown, CircleDashed, FileText, FileUp, FolderOpen, Maximize2, Minimize2, Minus, Plus, Save, UploadCloud, X } from 'lucide-react';
+import { CheckCircle2, ChevronDown, FileText, FileUp, FolderOpen, Maximize2, Minimize2, Save, UploadCloud, X } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { ButtonSpinner } from '../components/LoadingSpinner.jsx';
 import PdfWorkspace from '../components/PdfWorkspace.jsx';
 import SignatureInput from '../components/SignatureInput.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
-import { buildTemplateInputPreview, getUpdatedGroupedInputValue, scaleGroupedBoxesForRenderedField } from '../lib/templateFieldHelpers.js';
+import { buildTemplateInputPreview, getUpdatedGroupedInputValue, normalizeDateInputValue, scaleGroupedBoxesForRenderedField } from '../lib/templateFieldHelpers.js';
 
 function isVisibleDocumentRequest(request) {
   return String(request?.label || '').trim().toLowerCase() !== 'medical report';
@@ -30,6 +30,16 @@ function templateValueKey(field) {
     return `${field.name}__field_${field.id}`;
   }
   return field.name;
+}
+
+function normalizeTemplateValuesForFields(fields, values) {
+  const nextValues = { ...(values || {}) };
+  fields.forEach((field) => {
+    if (field.field_type !== 'date') return;
+    const key = templateValueKey(field);
+    nextValues[key] = normalizeDateInputValue(nextValues[key]);
+  });
+  return nextValues;
 }
 
 function ClientPortalLoader() {
@@ -81,7 +91,6 @@ export default function ClientUploadPage() {
   const [loadingPortal, setLoadingPortal] = useState(true);
   const [collapsedCards, setCollapsedCards] = useState({});
   const [templateFullscreen, setTemplateFullscreen] = useState(false);
-  const [templateZoom, setTemplateZoom] = useState(1);
   const [editingSignatureField, setEditingSignatureField] = useState(null);
 
   async function loadPortal() {
@@ -125,7 +134,10 @@ export default function ClientUploadPage() {
       });
       return;
     }
-    setClaimFormValues((current) => ({ ...current, [valueKey]: value }));
+    setClaimFormValues((current) => ({
+      ...current,
+      [valueKey]: field.field_type === 'date' ? normalizeDateInputValue(value) : value
+    }));
   }
 
   function signatureValueKey(field) {
@@ -186,8 +198,10 @@ export default function ClientUploadPage() {
   }, [activeClaimForm?.template, claimFormValues]);
 
   useEffect(() => {
-    setClaimFormValues(activeClaimForm?.document?.input || {});
-    setTemplateZoom(1);
+    setClaimFormValues(normalizeTemplateValuesForFields(
+      activeClaimForm?.template?.fields || [],
+      activeClaimForm?.document?.input || {}
+    ));
   }, [activeClaimForm?.id, activeClaimForm?.document?.id]);
 
   async function uploadDocument(requestId) {
@@ -225,7 +239,7 @@ export default function ClientUploadPage() {
     try {
       const result = await apiRequest(`/api/client-portal/${token}/forms/${activeClaimForm.id}`, {
         method: 'PATCH',
-        body: { data: claimFormValues }
+        body: { data: normalizeTemplateValuesForFields(activeClaimForm.template?.fields || [], claimFormValues) }
       });
       applyPortal(result);
       setMessage(`${activeClaimForm.template?.name || 'Template'} saved successfully.`);
@@ -298,58 +312,29 @@ export default function ClientUploadPage() {
                       {savingClaimForm ? <ButtonSpinner label="Saving..." /> : 'Save template'}
                     </button>
                   )}
-                  {activeClaimForm?.template && !isCardCollapsed('templates') && (
-                    <div className="client-template-zoom" aria-label="Template zoom controls">
+                  <div className="client-template-window-actions">
+                    {activeClaimForm?.template && !isCardCollapsed('templates') && (
                       <button
-                        className="icon-button ghost"
+                        className="icon-button ghost client-expand-button"
                         type="button"
-                        onClick={() => setTemplateZoom((current) => Math.max(0.7, Number((current - 0.1).toFixed(2))))}
-                        aria-label="Zoom out"
-                        title="Zoom out"
+                        onClick={() => setTemplateFullscreen((current) => !current)}
+                        aria-label={templateFullscreen ? 'Exit template full screen' : 'View template full screen'}
+                        title={templateFullscreen ? 'Exit full screen' : 'View full screen'}
                       >
-                        <Minus size={16} />
+                        {templateFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
                       </button>
-                      <button
-                        className="template-zoom-value"
-                        type="button"
-                        onClick={() => setTemplateZoom(1)}
-                        aria-label="Reset zoom"
-                        title="Reset zoom"
-                      >
-                        {Math.round(templateZoom * 100)}%
-                      </button>
-                      <button
-                        className="icon-button ghost"
-                        type="button"
-                        onClick={() => setTemplateZoom((current) => Math.min(1.8, Number((current + 0.1).toFixed(2))))}
-                        aria-label="Zoom in"
-                        title="Zoom in"
-                      >
-                        <Plus size={16} />
-                      </button>
-                    </div>
-                  )}
-                  {activeClaimForm?.template && !isCardCollapsed('templates') && (
+                    )}
                     <button
-                      className="icon-button ghost"
+                      className="icon-button ghost client-collapse-button"
                       type="button"
-                      onClick={() => setTemplateFullscreen((current) => !current)}
-                      aria-label={templateFullscreen ? 'Exit template full screen' : 'View template full screen'}
-                      title={templateFullscreen ? 'Exit full screen' : 'View full screen'}
+                      onClick={() => toggleCard('templates')}
+                      aria-expanded={!isCardCollapsed('templates')}
+                      aria-label={isCardCollapsed('templates') ? 'Expand attached templates' : 'Collapse attached templates'}
+                      title={isCardCollapsed('templates') ? 'Expand' : 'Collapse'}
                     >
-                      {templateFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+                      <ChevronDown size={17} />
                     </button>
-                  )}
-                  <button
-                    className="icon-button ghost client-collapse-button"
-                    type="button"
-                    onClick={() => toggleCard('templates')}
-                    aria-expanded={!isCardCollapsed('templates')}
-                    aria-label={isCardCollapsed('templates') ? 'Expand attached templates' : 'Collapse attached templates'}
-                    title={isCardCollapsed('templates') ? 'Expand' : 'Collapse'}
-                  >
-                    <ChevronDown size={17} />
-                  </button>
+                  </div>
                 </div>
               </div>
 
@@ -357,7 +342,7 @@ export default function ClientUploadPage() {
                 {claimForms.length > 0 ? (
                   <>
                   {activeClaimForm?.template && (
-                    <div className="client-template-preview medical-template-preview">
+                    <div className="client-template-preview client-upload-template-preview">
                       <PdfWorkspace
                         className="client-fit-pdf-workspace"
                         pdfPath={`/api/client-portal/${token}/forms/${activeClaimForm.id}/template/pdf`}
@@ -370,8 +355,8 @@ export default function ClientUploadPage() {
                         onEntryValueChange={updateClaimFormField}
                         values={activeTemplatePreview.values}
                         minScale={0.25}
-                        fitPadding={8}
-                        zoom={templateZoom}
+                        fitPadding={0}
+                        fitToPageWidth
                       />
                     </div>
                   )}
@@ -445,16 +430,20 @@ export default function ClientUploadPage() {
                           <h3>{request.label}</h3>
                         </div>
                         {request.instructions && <p className="client-request-guidance">{request.instructions}</p>}
-                        <p>{request.original_filename ? `${request.upload_count || 1} file(s) received · Latest: ${request.original_filename}` : 'PDF, image, or Word file. Upload additional files one at a time.'}</p>
-                        {request.ai_status === 'completed' && <p>AI extraction complete. The claim record and attached forms were updated from verified fields.</p>}
-                        {request.ai_status === 'review_required' && <p>The file was read, but extracted details need staff review before updating the matter.</p>}
-                        {['failed', 'skipped'].includes(request.ai_status) && <p>The file was received, but AI extraction needs staff review.</p>}
-                        <div className="client-selected-file-row">
-                          <div className={`client-selected-file ${files[request.id] ? 'ready' : ''}`} title={files[request.id]?.name || 'No file selected yet'}>
-                            {files[request.id] ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />}
-                            <span>{files[request.id]?.name || 'No file selected yet'}</span>
+                        <p className="client-request-file-line">
+                          {request.original_filename ? `${request.upload_count || 1} file(s) · ${request.original_filename}` : 'PDF, image, or Word file.'}
+                        </p>
+                        {request.ai_status === 'completed' && <p className="client-ai-feedback success">AI updated verified fields.</p>}
+                        {request.ai_status === 'review_required' && <p className="client-ai-feedback warning">Needs staff review.</p>}
+                        {['failed', 'skipped'].includes(request.ai_status) && <p className="client-ai-feedback warning">AI review needed.</p>}
+                        {files[request.id] && (
+                          <div className="client-selected-file-row">
+                            <div className="client-selected-file ready" title={files[request.id].name}>
+                              <CheckCircle2 size={14} />
+                              <span>{files[request.id].name}</span>
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </div>
                       <div className="client-request-actions">
                         {!files[request.id] && (

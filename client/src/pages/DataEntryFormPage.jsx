@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ButtonSpinner, PageLoader } from '../components/LoadingSpinner.jsx';
 import StatusMessage from '../components/StatusMessage.jsx';
 import { apiRequest } from '../lib/api.js';
-import { distributeGroupedText, getGroupedFieldBoxes, getUpdatedGroupedInputValue, groupedInputCount, normalizeGroupedText } from '../lib/templateFieldHelpers.js';
+import { distributeGroupedText, getGroupedFieldBoxes, getUpdatedGroupedInputValue, groupedInputCount, normalizeDateInputValue, normalizeGroupedText } from '../lib/templateFieldHelpers.js';
 
 function inputForField(field, value, onChange) {
   if (field.field_type === 'checkbox') {
@@ -17,7 +17,7 @@ function inputForField(field, value, onChange) {
 
   if (field.field_type === 'select') {
     return (
-      <select value={value || ''} onChange={(event) => onChange(event.target.value)} required={field.required}>
+      <select value={value || ''} onChange={(event) => onChange(event.target.value)}>
         <option value="">Select...</option>
         {(field.options || []).map((option) => <option key={option} value={option}>{option}</option>)}
       </select>
@@ -45,7 +45,6 @@ function inputForField(field, value, onChange) {
               aria-label={`${field.label} ${index + 1}`}
               value={line}
               onChange={(event) => updateLine(index, event.target.value)}
-              required={field.required && index === 0}
             />
           </label>
         ))}
@@ -53,8 +52,12 @@ function inputForField(field, value, onChange) {
     );
   }
 
-  const type = field.field_type === 'date' ? 'date' : field.field_type === 'number' ? 'number' : 'text';
-  return <input type={type} value={value || ''} onChange={(event) => onChange(event.target.value)} required={field.required} />;
+  const inputProps = field.field_type === 'date'
+    ? { type: 'date', value: normalizeDateInputValue(value) }
+    : field.field_type === 'number'
+      ? { type: 'text', inputMode: 'decimal', value: value || '' }
+      : { type: 'text', value: value || '' };
+  return <input {...inputProps} onChange={(event) => onChange(event.target.value)} />;
 }
 
 export default function DataEntryFormPage() {
