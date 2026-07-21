@@ -11,11 +11,8 @@ import { detectFieldsFromPdf } from '../services/fieldDetection.js';
 import { generateFilledPdf, validateDataAgainstFields } from '../services/pdfFill.js';
 import { parseSpreadsheet } from '../services/spreadsheet.js';
 import { getOwnedTemplate, getTemplateFields } from '../services/templateAccess.js';
-
 export const templatesRouter = express.Router();
-
 const allowedFieldTypes = new Set(['text', 'number', 'date', 'checkbox', 'select', 'signature', 'repeatable']);
-
 function normalizeField(input) {
   const name = String(input.name || input.label || 'field').trim().replace(/\s+/g, '_').toLowerCase();
   return {
@@ -32,67 +29,39 @@ function normalizeField(input) {
     options_json: JSON.stringify(input.options || [])
   };
 }
-
 function fieldIdentity(field) {
-  return String(field.label || field.name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  return String(field.label || field.name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
-
-function insertField(templateId, field) {
+async function insertField(templateId, field) {
   const clean = normalizeField(field);
-  const result = db.prepare(`
+  const result = await db.prepare(`
     INSERT INTO template_fields
       (template_id, name, label, page_number, x, y, width, height, field_type, required, default_value, options_json)
     VALUES
       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    templateId,
-    clean.name,
-    clean.label,
-    clean.page_number,
-    clean.x,
-    clean.y,
-    clean.width,
-    clean.height,
-    clean.field_type,
-    clean.required,
-    clean.default_value,
-    clean.options_json
-  );
+  `).run(templateId, clean.name, clean.label, clean.page_number, clean.x, clean.y, clean.width, clean.height, clean.field_type, clean.required, clean.default_value, clean.options_json);
   return result.lastInsertRowid;
 }
-
-function updateFieldLayout(templateId, fieldId, field) {
+async function updateFieldLayout(templateId, fieldId, field) {
   const clean = normalizeField(field);
-  db.prepare(`
+  await db.prepare(`
     UPDATE template_fields
     SET x = ?, y = ?, width = ?, height = ?, field_type = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND template_id = ?
-  `).run(
-    clean.x,
-    clean.y,
-    clean.width,
-    clean.height,
-    clean.field_type,
-    fieldId,
-    templateId
-  );
+  `).run(clean.x, clean.y, clean.width, clean.height, clean.field_type, fieldId, templateId);
 }
-
-function getTemplateOr404(req, res) {
-  const template = getOwnedTemplate(req.params.id, req.user.id);
+async function getTemplateOr404(req, res) {
+  const template = await getOwnedTemplate(req.params.id, req.user.id);
   if (!template) {
-    res.status(404).json({ error: 'Template not found' });
+    res.status(404).json({
+      error: 'Template not found'
+    });
     return null;
   }
   return template;
 }
-
-templatesRouter.get('/', authenticate, (req, res) => {
-  const rows = db.prepare(`
+templatesRouter.get('/', authenticate, async (req, res) => {
+  const rows = await db.prepare(`
     SELECT document_templates.*, COUNT(template_fields.id) AS field_count
     FROM document_templates
     LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
@@ -100,146 +69,139 @@ templatesRouter.get('/', authenticate, (req, res) => {
     GROUP BY document_templates.id
     ORDER BY document_templates.created_at DESC
   `).all(req.user.id);
-  res.json({ templates: rows.map(serializeTemplate) });
+  res.json({
+    templates: rows.map(serializeTemplate)
+  });
 });
-
 templatesRouter.post('/upload', authenticate, pdfUpload.single('pdf'), async (req, res, next) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'PDF file is required' });
-
+    if (!req.file) return res.status(400).json({
+      error: 'PDF file is required'
+    });
     const bytes = await fsp.readFile(req.file.path);
     const pdf = await PDFDocument.load(bytes);
     const name = String(req.body.name || req.file.originalname.replace(/\.pdf$/i, '') || 'Untitled template').trim();
-
-    const result = db.prepare(`
+    const result = await db.prepare(`
       INSERT INTO document_templates (user_id, name, original_filename, stored_filename, page_count, status)
       VALUES (?, ?, ?, ?, ?, 'needs_setup')
     `).run(req.user.id, name, req.file.originalname, req.file.filename, pdf.getPageCount());
-
     const templateId = result.lastInsertRowid;
     const detectedFields = await detectFieldsFromPdf(req.file.filename);
-    const insertMany = db.transaction((fields) => {
-      fields.forEach((field) => insertField(templateId, field));
+    const insertMany = db.transaction(async fields => {
+      for (const field of fields) await insertField(templateId, field);
     });
-    insertMany(detectedFields);
-
-    const template = db.prepare(`
+    await insertMany(detectedFields);
+    const template = await db.prepare(`
       SELECT document_templates.*, COUNT(template_fields.id) AS field_count
       FROM document_templates
       LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
       WHERE document_templates.id = ?
       GROUP BY document_templates.id
     `).get(templateId);
-
     return res.status(201).json({
       template: serializeTemplate(template),
       detectedFields: detectedFields.length
     });
   } catch (error) {
-    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    if (req.file) fs.rm(req.file.path, {
+      force: true
+    }, () => {});
     return next(error);
   }
 });
-
-templatesRouter.get('/:id', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.get('/:id', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
-  const fieldRows = getTemplateFields(template.id);
+  const fieldRows = await getTemplateFields(template.id);
   return res.json({
-    template: serializeTemplate({ ...template, field_count: fieldRows.length }),
+    template: serializeTemplate({
+      ...template,
+      field_count: fieldRows.length
+    }),
     fields: fieldRows.map(serializeField)
   });
 });
-
-templatesRouter.get('/:id/pdf', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.get('/:id/pdf', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
   const filePath = resolveInside(originalsDir, template.stored_filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'PDF is missing from storage' });
-
+  if (!fs.existsSync(filePath)) return res.status(404).json({
+    error: 'PDF is missing from storage'
+  });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${template.original_filename}"`);
   fs.createReadStream(filePath).pipe(res);
 });
-
-templatesRouter.patch('/:id', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.patch('/:id', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
   const name = String(req.body?.name || '').trim();
   const status = String(req.body?.status || template.status).trim();
   const allowedStatuses = new Set(['needs_setup', 'ready', 'archived']);
-
-  if (!name) return res.status(400).json({ error: 'Template name is required' });
-  if (!allowedStatuses.has(status)) return res.status(400).json({ error: 'Choose a valid template status' });
-
-  db.prepare(`
+  if (!name) return res.status(400).json({
+    error: 'Template name is required'
+  });
+  if (!allowedStatuses.has(status)) return res.status(400).json({
+    error: 'Choose a valid template status'
+  });
+  await db.prepare(`
     UPDATE document_templates
     SET name = ?, status = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND user_id = ?
   `).run(name, status, template.id, req.user.id);
-
-  const updated = db.prepare(`
+  const updated = await db.prepare(`
     SELECT document_templates.*, COUNT(template_fields.id) AS field_count
     FROM document_templates
     LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
     WHERE document_templates.id = ? AND document_templates.user_id = ?
     GROUP BY document_templates.id
   `).get(template.id, req.user.id);
-
-  return res.json({ template: serializeTemplate(updated) });
+  return res.json({
+    template: serializeTemplate(updated)
+  });
 });
-
 templatesRouter.post('/:id/fields/detect', authenticate, async (req, res, next) => {
   try {
-    const template = getTemplateOr404(req, res);
+    const template = await getTemplateOr404(req, res);
     if (!template) return;
-
-    const existingFields = getTemplateFields(template.id).map(serializeField);
-    const existingByKey = new Map(existingFields.map((field) => [`${field.page_number}:${fieldIdentity(field)}`, field]));
+    const existingFields = (await getTemplateFields(template.id)).map(serializeField);
+    const existingByKey = new Map(existingFields.map(field => [`${field.page_number}:${fieldIdentity(field)}`, field]));
     const existingKeys = new Set(existingByKey.keys());
     const requestedPage = Number(req.body?.pageNumber || 0);
-    const pageNumbers = requestedPage >= 1 && requestedPage <= Number(template.page_count || requestedPage)
-      ? [requestedPage]
-      : null;
+    const pageNumbers = requestedPage >= 1 && requestedPage <= Number(template.page_count || requestedPage) ? [requestedPage] : null;
     const maxFields = Math.max(1, Math.min(500, Number(req.body?.maxFields || 90)));
-    const detectedFields = await detectFieldsFromPdf(template.stored_filename, { pageNumbers, maxFields });
+    const detectedFields = await detectFieldsFromPdf(template.stored_filename, {
+      pageNumbers,
+      maxFields
+    });
     const updateExisting = req.body?.updateExisting !== false;
-    const additions = detectedFields.filter((field) => {
+    const additions = detectedFields.filter(field => {
       const key = `${field.page_number}:${fieldIdentity(field)}`;
       return fieldIdentity(field) && !existingKeys.has(key);
     });
-    const updates = detectedFields.filter((field) => {
+    const updates = detectedFields.filter(field => {
       if (!updateExisting) return false;
       const key = `${field.page_number}:${fieldIdentity(field)}`;
       const existing = existingByKey.get(key);
       if (!existing) return false;
-      return Math.abs(Number(existing.x) - Number(field.x)) > 1
-        || Math.abs(Number(existing.y) - Number(field.y)) > 1
-        || Math.abs(Number(existing.width) - Number(field.width)) > 1
-        || Math.abs(Number(existing.height) - Number(field.height)) > 1
-        || existing.field_type !== field.field_type;
+      return Math.abs(Number(existing.x) - Number(field.x)) > 1 || Math.abs(Number(existing.y) - Number(field.y)) > 1 || Math.abs(Number(existing.width) - Number(field.width)) > 1 || Math.abs(Number(existing.height) - Number(field.height)) > 1 || existing.field_type !== field.field_type;
     });
-
     if (additions.length > 0 || updates.length > 0) {
-      const applyDetectedFields = db.transaction((fieldsToAdd, fieldsToUpdate) => {
-        fieldsToAdd.forEach((field) => insertField(template.id, field));
-        fieldsToUpdate.forEach((field) => {
+      const applyDetectedFields = db.transaction(async (fieldsToAdd, fieldsToUpdate) => {
+        for (const field of fieldsToAdd) await insertField(template.id, field);
+        for (const field of fieldsToUpdate) {
           const existing = existingByKey.get(`${field.page_number}:${fieldIdentity(field)}`);
-          if (existing) updateFieldLayout(template.id, existing.id, field);
-        });
-        db.prepare(`
+          if (existing) await updateFieldLayout(template.id, existing.id, field);
+        }
+        await db.prepare(`
           UPDATE document_templates
           SET status = 'ready', updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(template.id);
       });
-      applyDetectedFields(additions, updates);
+      await applyDetectedFields(additions, updates);
     }
-
-    const fields = getTemplateFields(template.id).map(serializeField);
+    const fields = (await getTemplateFields(template.id)).map(serializeField);
     return res.status(201).json({
       fields,
       detectedFields: detectedFields.length,
@@ -250,81 +212,68 @@ templatesRouter.post('/:id/fields/detect', authenticate, async (req, res, next) 
     return next(error);
   }
 });
-
-templatesRouter.post('/:id/fields', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.post('/:id/fields', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
   if (Array.isArray(req.body.fields)) {
-    const replaceFields = db.transaction((fields) => {
-      db.prepare('DELETE FROM template_fields WHERE template_id = ?').run(template.id);
-      fields.forEach((field) => insertField(template.id, field));
-      db.prepare(`
+    const replaceFields = db.transaction(async fields => {
+      await db.prepare('DELETE FROM template_fields WHERE template_id = ?').run(template.id);
+      for (const field of fields) await insertField(template.id, field);
+      await db.prepare(`
         UPDATE document_templates
         SET status = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(fields.length ? 'ready' : 'needs_setup', template.id);
     });
-    replaceFields(req.body.fields);
+    await replaceFields(req.body.fields);
   } else {
-    insertField(template.id, req.body || {});
-    db.prepare(`
+    await insertField(template.id, req.body || {});
+    await db.prepare(`
       UPDATE document_templates
       SET status = 'ready', updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(template.id);
   }
-
-  const fields = getTemplateFields(template.id).map(serializeField);
-  return res.status(201).json({ fields });
+  const fields = (await getTemplateFields(template.id)).map(serializeField);
+  return res.status(201).json({
+    fields
+  });
 });
-
-templatesRouter.put('/:id/fields/:fieldId', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.put('/:id/fields/:fieldId', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
-  const existing = db.prepare('SELECT * FROM template_fields WHERE id = ? AND template_id = ?').get(req.params.fieldId, template.id);
-  if (!existing) return res.status(404).json({ error: 'Field not found' });
-
-  const clean = normalizeField({ ...existing, ...req.body });
-  db.prepare(`
+  const existing = await db.prepare('SELECT * FROM template_fields WHERE id = ? AND template_id = ?').get(req.params.fieldId, template.id);
+  if (!existing) return res.status(404).json({
+    error: 'Field not found'
+  });
+  const clean = normalizeField({
+    ...existing,
+    ...req.body
+  });
+  await db.prepare(`
     UPDATE template_fields
     SET name = ?, label = ?, page_number = ?, x = ?, y = ?, width = ?, height = ?,
         field_type = ?, required = ?, default_value = ?, options_json = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND template_id = ?
-  `).run(
-    clean.name,
-    clean.label,
-    clean.page_number,
-    clean.x,
-    clean.y,
-    clean.width,
-    clean.height,
-    clean.field_type,
-    clean.required,
-    clean.default_value,
-    clean.options_json,
-    req.params.fieldId,
-    template.id
-  );
-
-  const row = db.prepare('SELECT * FROM template_fields WHERE id = ?').get(req.params.fieldId);
-  return res.json({ field: serializeField(row) });
+  `).run(clean.name, clean.label, clean.page_number, clean.x, clean.y, clean.width, clean.height, clean.field_type, clean.required, clean.default_value, clean.options_json, req.params.fieldId, template.id);
+  const row = await db.prepare('SELECT * FROM template_fields WHERE id = ?').get(req.params.fieldId);
+  return res.json({
+    field: serializeField(row)
+  });
 });
-
-templatesRouter.delete('/:id/sections', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.delete('/:id/sections', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
   const title = String(req.body?.title || '').trim();
-  if (!title) return res.status(400).json({ error: 'Section title is required' });
-
-  const rows = db.prepare(`
+  if (!title) return res.status(400).json({
+    error: 'Section title is required'
+  });
+  const rows = await db.prepare(`
     SELECT id, options_json
     FROM template_fields
     WHERE template_id = ?
   `).all(template.id);
-  const updates = rows.flatMap((row) => {
+  const updates = rows.flatMap(row => {
     let options = [];
     try {
       options = row.options_json ? JSON.parse(row.options_json) : [];
@@ -332,90 +281,96 @@ templatesRouter.delete('/:id/sections', authenticate, (req, res) => {
       options = [];
     }
     if (!Array.isArray(options)) options = [];
-    const nextOptions = options.filter((option) => !(
-      option?.kind === 'section-title' && String(option.value || '').trim() === title
-    ));
-    return nextOptions.length === options.length ? [] : [{ id: row.id, options: nextOptions }];
+    const nextOptions = options.filter(option => !(option?.kind === 'section-title' && String(option.value || '').trim() === title));
+    return nextOptions.length === options.length ? [] : [{
+      id: row.id,
+      options: nextOptions
+    }];
   });
-
-  const removeSection = db.transaction((fieldUpdates) => {
+  const removeSection = db.transaction(async fieldUpdates => {
     const updateField = db.prepare(`
       UPDATE template_fields
       SET options_json = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND template_id = ?
     `);
-    fieldUpdates.forEach((field) => {
-      updateField.run(JSON.stringify(field.options), field.id, template.id);
-    });
-    db.prepare(`
+    for (const field of fieldUpdates) {
+      await updateField.run(JSON.stringify(field.options), field.id, template.id);
+    }
+    await db.prepare(`
       UPDATE document_templates
       SET updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(template.id);
   });
-  removeSection(updates);
-
-  return res.json({ removedFields: updates.length });
+  await removeSection(updates);
+  return res.json({
+    removedFields: updates.length
+  });
 });
-
-templatesRouter.delete('/:id/fields/:fieldId', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.delete('/:id/fields/:fieldId', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
-  db.prepare('DELETE FROM template_fields WHERE id = ? AND template_id = ?').run(req.params.fieldId, template.id);
-  const count = db.prepare('SELECT COUNT(*) AS count FROM template_fields WHERE template_id = ?').get(template.id).count;
-  db.prepare(`
+  await db.prepare('DELETE FROM template_fields WHERE id = ? AND template_id = ?').run(req.params.fieldId, template.id);
+  const count = (await db.prepare('SELECT COUNT(*) AS count FROM template_fields WHERE template_id = ?').get(template.id)).count;
+  await db.prepare(`
     UPDATE document_templates
     SET status = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(count ? 'ready' : 'needs_setup', template.id);
   return res.status(204).end();
 });
-
-templatesRouter.delete('/:id', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.delete('/:id', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
-  const generatedDocuments = db.prepare(`
+  const generatedDocuments = await db.prepare(`
     SELECT stored_filename
     FROM generated_documents
     WHERE template_id = ? AND user_id = ?
   `).all(template.id, req.user.id);
-
-  db.prepare('DELETE FROM document_templates WHERE id = ? AND user_id = ?').run(template.id, req.user.id);
-
-  fs.rm(resolveInside(originalsDir, template.stored_filename), { force: true }, () => {});
+  await db.prepare('DELETE FROM document_templates WHERE id = ? AND user_id = ?').run(template.id, req.user.id);
+  fs.rm(resolveInside(originalsDir, template.stored_filename), {
+    force: true
+  }, () => {});
   for (const document of generatedDocuments) {
     if (document.stored_filename) {
-      fs.rm(resolveInside(generatedDir, document.stored_filename), { force: true }, () => {});
+      fs.rm(resolveInside(generatedDir, document.stored_filename), {
+        force: true
+      }, () => {});
     }
   }
-
   return res.status(204).end();
 });
-
 templatesRouter.post('/:id/generate/form', authenticate, async (req, res, next) => {
   try {
-    const template = getTemplateOr404(req, res);
+    const template = await getTemplateOr404(req, res);
     if (!template) return;
-    const fields = getTemplateFields(template.id).map(serializeField);
+    const fields = (await getTemplateFields(template.id)).map(serializeField);
     const data = req.body.data || req.body || {};
     const errors = validateDataAgainstFields(fields, data);
-    if (errors.length) return res.status(400).json({ errors });
-
-    const document = await generateFilledPdf({ template, fields, data, userId: req.user.id, sourceType: 'form' });
-    return res.status(201).json({ document });
+    if (errors.length) return res.status(400).json({
+      errors
+    });
+    const document = await generateFilledPdf({
+      template,
+      fields,
+      data,
+      userId: req.user.id,
+      sourceType: 'form'
+    });
+    return res.status(201).json({
+      document
+    });
   } catch (error) {
     return next(error);
   }
 });
-
-templatesRouter.post('/:id/spreadsheet/preview', authenticate, spreadsheetUpload.single('spreadsheet'), (req, res, next) => {
+templatesRouter.post('/:id/spreadsheet/preview', authenticate, spreadsheetUpload.single('spreadsheet'), async (req, res, next) => {
   try {
-    const template = getTemplateOr404(req, res);
+    const template = await getTemplateOr404(req, res);
     if (!template) return;
-    if (!req.file) return res.status(400).json({ error: 'Spreadsheet is required' });
-
+    if (!req.file) return res.status(400).json({
+      error: 'Spreadsheet is required'
+    });
     const parsed = parseSpreadsheet(req.file.path);
     return res.json({
       sheetName: parsed.sheetName,
@@ -424,27 +379,27 @@ templatesRouter.post('/:id/spreadsheet/preview', authenticate, spreadsheetUpload
       rowCount: parsed.rows.length
     });
   } catch (error) {
-    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    if (req.file) fs.rm(req.file.path, {
+      force: true
+    }, () => {});
     return next(error);
   }
 });
-
 templatesRouter.post('/:id/generate/spreadsheet', authenticate, spreadsheetUpload.single('spreadsheet'), async (req, res, next) => {
   try {
-    const template = getTemplateOr404(req, res);
+    const template = await getTemplateOr404(req, res);
     if (!template) return;
-    if (!req.file) return res.status(400).json({ error: 'Spreadsheet is required' });
-
-    const fields = getTemplateFields(template.id).map(serializeField);
+    if (!req.file) return res.status(400).json({
+      error: 'Spreadsheet is required'
+    });
+    const fields = (await getTemplateFields(template.id)).map(serializeField);
     const mapping = JSON.parse(req.body.mapping || '{}');
     const parsed = parseSpreadsheet(req.file.path);
     const documents = [];
-
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO field_mappings (template_id, user_id, name, source_type, mapping_json)
       VALUES (?, ?, ?, 'spreadsheet', ?)
     `).run(template.id, req.user.id, req.body.mappingName || `Mapping ${new Date().toLocaleDateString()}`, JSON.stringify(mapping));
-
     for (let index = 0; index < parsed.rows.length; index += 1) {
       const row = parsed.rows[index];
       const data = {};
@@ -454,7 +409,9 @@ templatesRouter.post('/:id/generate/spreadsheet', authenticate, spreadsheetUploa
       }
       const errors = validateDataAgainstFields(fields, data);
       if (errors.length) {
-        return res.status(400).json({ error: `Row ${index + 1}: ${errors.join(', ')}` });
+        return res.status(400).json({
+          error: `Row ${index + 1}: ${errors.join(', ')}`
+        });
       }
       documents.push(await generateFilledPdf({
         template,
@@ -465,43 +422,58 @@ templatesRouter.post('/:id/generate/spreadsheet', authenticate, spreadsheetUploa
         rowNumber: index + 1
       }));
     }
-
-    return res.status(201).json({ documents, count: documents.length });
+    return res.status(201).json({
+      documents,
+      count: documents.length
+    });
   } catch (error) {
-    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    if (req.file) fs.rm(req.file.path, {
+      force: true
+    }, () => {});
     return next(error);
   }
 });
-
-templatesRouter.post('/:id/api-key', authenticate, (req, res) => {
-  const template = getTemplateOr404(req, res);
+templatesRouter.post('/:id/api-key', authenticate, async (req, res) => {
+  const template = await getTemplateOr404(req, res);
   if (!template) return;
-
   const apiKey = `orc_live_${crypto.randomBytes(24).toString('hex')}`;
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO api_keys (user_id, template_id, name, key_hash)
     VALUES (?, ?, ?, ?)
   `).run(req.user.id, template.id, req.body.name || 'Default API key', hashApiKey(apiKey));
-
-  return res.status(201).json({ apiKey });
+  return res.status(201).json({
+    apiKey
+  });
 });
-
 templatesRouter.post('/:id/generate/api', authenticateJwtOrApiKey, async (req, res, next) => {
   try {
     if (req.apiKey && Number(req.apiKey.template_id) !== Number(req.params.id)) {
-      return res.status(403).json({ error: 'API key is not authorized for this template' });
+      return res.status(403).json({
+        error: 'API key is not authorized for this template'
+      });
     }
-
-    const template = getOwnedTemplate(req.params.id, req.user.id);
-    if (!template) return res.status(404).json({ error: 'Template not found' });
-
-    const fields = getTemplateFields(template.id).map(serializeField);
+    const template = await getOwnedTemplate(req.params.id, req.user.id);
+    if (!template) return res.status(404).json({
+      error: 'Template not found'
+    });
+    const fields = (await getTemplateFields(template.id)).map(serializeField);
     const data = req.body.data || req.body || {};
-    const errors = validateDataAgainstFields(fields, data, { rejectUnknown: true });
-    if (errors.length) return res.status(400).json({ errors });
-
-    const document = await generateFilledPdf({ template, fields, data, userId: req.user.id, sourceType: 'api' });
-    return res.status(201).json({ document });
+    const errors = validateDataAgainstFields(fields, data, {
+      rejectUnknown: true
+    });
+    if (errors.length) return res.status(400).json({
+      errors
+    });
+    const document = await generateFilledPdf({
+      template,
+      fields,
+      data,
+      userId: req.user.id,
+      sourceType: 'api'
+    });
+    return res.status(201).json({
+      document
+    });
   } catch (error) {
     return next(error);
   }

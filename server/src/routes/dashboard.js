@@ -3,24 +3,19 @@ import { config } from '../config.js';
 import { db, serializeDocument, serializeTemplate } from '../db/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { openFirmDatabase } from '../services/firmDatabases.js';
-
 export const dashboardRouter = express.Router();
-
-function getBillingRate() {
-  const setting = db.prepare("SELECT value FROM app_settings WHERE key = 'billing_rate_per_application'").get();
+async function getBillingRate() {
+  const setting = await db.prepare("SELECT value FROM app_settings WHERE `key` = 'billing_rate_per_application'").get();
   const rate = Number(setting?.value || config.billingRatePerApplication);
   return Number.isFinite(rate) && rate > 0 ? rate : config.billingRatePerApplication;
 }
-
 function getFirmBillingRate(firm, defaultBillingRate) {
   const firmRate = Number(firm.billing_rate_per_application);
   return Number.isFinite(firmRate) && firmRate > 0 ? firmRate : defaultBillingRate;
 }
-
 function getYearMonthBuckets() {
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const year = new Date().getFullYear();
-
   return monthNames.map((monthName, index) => {
     const month = index + 1;
     return {
@@ -30,31 +25,25 @@ function getYearMonthBuckets() {
     };
   });
 }
-
-function getFirmAnalyticsRow(firm, defaultBillingRate, monthKeys) {
-  const firmDb = openFirmDatabase(firm);
-
+async function getFirmAnalyticsRow(firm, defaultBillingRate, monthKeys) {
+  const firmDb = await openFirmDatabase(firm);
   try {
     const billingRate = getFirmBillingRate(firm, defaultBillingRate);
-    const clients = firmDb.prepare('SELECT COUNT(*) AS count FROM firm_clients').get().count;
-    const applications = firmDb.prepare('SELECT COUNT(*) AS count FROM raf_cases').get().count;
-    const openApplications = firmDb.prepare("SELECT COUNT(*) AS count FROM raf_cases WHERE status != 'closed'").get().count;
-    const uploadedDocuments = firmDb.prepare('SELECT COUNT(*) AS count FROM client_uploads').get().count;
-    const pendingDocumentRequests = firmDb.prepare("SELECT COUNT(*) AS count FROM client_document_requests WHERE status = 'requested'").get().count;
-    const lastApplication = firmDb.prepare('SELECT MAX(opened_at) AS opened_at FROM raf_cases').get().opened_at;
-    const monthlyRows = firmDb.prepare(`
+    const clients = (await firmDb.prepare('SELECT COUNT(*) AS count FROM firm_clients').get()).count;
+    const applications = (await firmDb.prepare('SELECT COUNT(*) AS count FROM raf_cases').get()).count;
+    const openApplications = (await firmDb.prepare("SELECT COUNT(*) AS count FROM raf_cases WHERE status != 'closed'").get()).count;
+    const uploadedDocuments = (await firmDb.prepare('SELECT COUNT(*) AS count FROM client_uploads').get()).count;
+    const pendingDocumentRequests = (await firmDb.prepare("SELECT COUNT(*) AS count FROM client_document_requests WHERE status = 'requested'").get()).count;
+    const lastApplication = (await firmDb.prepare('SELECT MAX(opened_at) AS opened_at FROM raf_cases').get()).opened_at;
+    const monthlyRows = await firmDb.prepare(`
       SELECT strftime('%Y-%m', opened_at) AS month_key, COUNT(*) AS applications
       FROM raf_cases
       GROUP BY month_key
     `).all();
-
-    const monthlyApplications = monthlyRows
-      .filter((row) => monthKeys.has(row.month_key))
-      .map((row) => ({
-        key: row.month_key,
-        applications: row.applications
-      }));
-
+    const monthlyApplications = monthlyRows.filter(row => monthKeys.has(row.month_key)).map(row => ({
+      key: row.month_key,
+      applications: row.applications
+    }));
     return {
       firm_id: firm.id,
       firm_name: firm.name,
@@ -72,24 +61,21 @@ function getFirmAnalyticsRow(firm, defaultBillingRate, monthKeys) {
       monthly_applications: monthlyApplications
     };
   } finally {
-    firmDb.close();
+    await firmDb.close();
   }
 }
-
-function getAdminDashboardPayload() {
-  const defaultBillingRate = getBillingRate();
+async function getAdminDashboardPayload() {
+  const defaultBillingRate = await getBillingRate();
   const monthBuckets = getYearMonthBuckets();
-  const monthKeys = new Set(monthBuckets.map((bucket) => bucket.key));
-  const firms = db.prepare('SELECT * FROM firms ORDER BY name COLLATE NOCASE').all();
-  const rows = firms.map((firm) => getFirmAnalyticsRow(firm, defaultBillingRate, monthKeys));
-
+  const monthKeys = new Set(monthBuckets.map(bucket => bucket.key));
+  const firms = await db.prepare('SELECT * FROM firms ORDER BY name COLLATE NOCASE').all();
+  const rows = await Promise.all(firms.map(firm => getFirmAnalyticsRow(firm, defaultBillingRate, monthKeys)));
   for (const row of rows) {
     for (const month of row.monthly_applications) {
-      const bucket = monthBuckets.find((item) => item.key === month.key);
+      const bucket = monthBuckets.find(item => item.key === month.key);
       if (bucket) bucket.applications += month.applications;
     }
   }
-
   const summary = rows.reduce((totals, row) => ({
     firms: totals.firms + 1,
     active_firms: totals.active_firms + (row.status === 'active' ? 1 : 0),
@@ -109,37 +95,40 @@ function getAdminDashboardPayload() {
     pending_document_requests: 0,
     amount_due: 0
   });
-
   return {
     dashboard_mode: 'admin',
     rate_per_application: defaultBillingRate,
     firm_summary: summary,
     firm_rows: rows.sort((a, b) => b.amount_due - a.amount_due || b.applications - a.applications),
-    monthly_applications: monthBuckets.map(({ month, applications }) => ({ month, applications }))
+    monthly_applications: monthBuckets.map(({
+      month,
+      applications
+    }) => ({
+      month,
+      applications
+    }))
   };
 }
-
-dashboardRouter.get('/', authenticate, (req, res) => {
+dashboardRouter.get('/', authenticate, async (req, res) => {
   if (req.user.role === 'admin') {
-    return res.json(getAdminDashboardPayload());
+    return res.json(await getAdminDashboardPayload());
   }
-
-  const totalTemplates = db.prepare('SELECT COUNT(*) AS count FROM document_templates WHERE user_id = ?').get(req.user.id).count;
-  const totalDocuments = db.prepare('SELECT COUNT(*) AS count FROM generated_documents WHERE user_id = ?').get(req.user.id).count;
-  const templatesNeedingSetup = db.prepare(`
+  const totalTemplates = (await db.prepare('SELECT COUNT(*) AS count FROM document_templates WHERE user_id = ?').get(req.user.id)).count;
+  const totalDocuments = (await db.prepare('SELECT COUNT(*) AS count FROM generated_documents WHERE user_id = ?').get(req.user.id)).count;
+  const templatesNeedingSetup = (await db.prepare(`
     SELECT COUNT(*) AS count
     FROM document_templates
     WHERE user_id = ? AND status != 'ready'
-  `).get(req.user.id).count;
-  const recentDocuments = db.prepare(`
+  `).get(req.user.id)).count;
+  const recentDocuments = (await db.prepare(`
     SELECT generated_documents.*, document_templates.name AS template_name
     FROM generated_documents
     JOIN document_templates ON document_templates.id = generated_documents.template_id
     WHERE generated_documents.user_id = ?
     ORDER BY generated_documents.created_at DESC
     LIMIT 5
-  `).all(req.user.id).map(serializeDocument);
-  const setupTemplates = db.prepare(`
+  `).all(req.user.id)).map(serializeDocument);
+  const setupTemplates = (await db.prepare(`
     SELECT document_templates.*, COUNT(template_fields.id) AS field_count
     FROM document_templates
     LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
@@ -147,8 +136,7 @@ dashboardRouter.get('/', authenticate, (req, res) => {
     GROUP BY document_templates.id
     ORDER BY document_templates.created_at DESC
     LIMIT 5
-  `).all(req.user.id).map(serializeTemplate);
-
+  `).all(req.user.id)).map(serializeTemplate);
   res.json({
     totalTemplates,
     totalDocuments,

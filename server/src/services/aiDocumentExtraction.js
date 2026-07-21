@@ -8,12 +8,10 @@ import { db, serializeField } from '../db/db.js';
 import { clientUploadsDir, config, resolveInside } from '../config.js';
 import { generateFilledPdf } from './pdfFill.js';
 import { getTemplateFields } from './templateAccess.js';
-
 const nullableText = z.string().nullable();
 const confidence = z.number().min(0).max(1);
 const localTextLimit = 14000;
 const openAiResponsesUrl = 'https://api.openai.com/v1/responses';
-
 const extractedDocumentSchema = z.object({
   document_kind: z.string(),
   summary: z.string(),
@@ -58,7 +56,11 @@ const extractedDocumentSchema = z.object({
     injuries: z.array(z.string()),
     diagnoses: z.array(z.string()),
     treatment: z.array(z.string()),
-    providers: z.array(z.object({ name: nullableText, type: nullableText, contact: nullableText })),
+    providers: z.array(z.object({
+      name: nullableText,
+      type: nullableText,
+      contact: nullableText
+    })),
     admission_date: nullableText,
     discharge_date: nullableText,
     sick_leave: nullableText,
@@ -103,7 +105,6 @@ const extractedDocumentSchema = z.object({
   warnings: z.array(z.string()),
   overall_confidence: confidence
 });
-
 const templateFieldReviewSchema = z.object({
   decisions: z.array(z.object({
     field_name: z.string(),
@@ -114,7 +115,6 @@ const templateFieldReviewSchema = z.object({
     confidence
   }))
 });
-
 function parseJson(value, fallback = {}) {
   if (!value) return fallback;
   try {
@@ -123,31 +123,25 @@ function parseJson(value, fallback = {}) {
     return fallback;
   }
 }
-
 function hasValue(value) {
   if (Array.isArray(value)) return value.some(hasValue);
   return value != null && String(value).trim() !== '';
 }
-
 function normalizeKey(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
-
 function compactObject(value) {
   return Object.fromEntries(Object.entries(value || {}).filter(([, entry]) => hasValue(entry)));
 }
-
 function normalizePersonText(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
-
 function personMatchesClaim(party, claim) {
   const extractedFirst = normalizePersonText(party?.first_name);
   const extractedSurname = normalizePersonText(party?.surname);
   const extractedFullName = normalizePersonText(party?.full_name);
   const claimFirst = normalizePersonText(claim?.first_name);
   const claimSurname = normalizePersonText(claim?.surname);
-
   if (!extractedFirst && !extractedSurname && !extractedFullName) return true;
   if (extractedSurname && claimSurname && extractedSurname !== claimSurname) return false;
   if (extractedFirst && claimFirst && extractedFirst !== claimFirst) return false;
@@ -155,21 +149,23 @@ function personMatchesClaim(party, claim) {
   if (!extractedSurname && claimSurname && extractedFullName && !extractedFullName.includes(claimSurname)) return false;
   return true;
 }
-
 function mergeMissing(current, extracted) {
-  const merged = { ...(current || {}) };
+  const merged = {
+    ...(current || {})
+  };
   for (const [key, value] of Object.entries(extracted || {})) {
     if (!hasValue(merged[key]) && hasValue(value)) merged[key] = value;
   }
   return merged;
 }
-
-function buildTemplateFieldPrompt(firmDb, caseId) {
-  const attachments = firmDb.prepare('SELECT template_id FROM claim_form_templates WHERE case_id = ?').all(caseId);
-  return attachments.flatMap(({ template_id: templateId }) => {
-    const template = db.prepare('SELECT id, name FROM document_templates WHERE id = ?').get(templateId);
+async function buildTemplateFieldPrompt(firmDb, caseId) {
+  const attachments = await firmDb.prepare('SELECT template_id FROM claim_form_templates WHERE case_id = ?').all(caseId);
+  return attachments.flatMap(async ({
+    template_id: templateId
+  }) => {
+    const template = await db.prepare('SELECT id, name FROM document_templates WHERE id = ?').get(templateId);
     if (!template) return [];
-    return getTemplateFields(template.id).map((field) => ({
+    return (await getTemplateFields(template.id)).map(field => ({
       template: template.name,
       field_name: field.name,
       label: field.label,
@@ -177,113 +173,96 @@ function buildTemplateFieldPrompt(firmDb, caseId) {
     }));
   });
 }
-
 async function extractPdfText(fileBuffer) {
   try {
     const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(fileBuffer), useSystemFonts: true });
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(fileBuffer),
+      useSystemFonts: true
+    });
     const pdf = await loadingTask.promise;
     const pages = [];
-
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
-      const text = content.items
-        .map((item) => String(item.str || '').trim())
-        .filter(Boolean)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+      const text = content.items.map(item => String(item.str || '').trim()).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
       if (text) pages.push(`Page ${pageNumber}: ${text}`);
       if (pages.join('\n\n').length >= localTextLimit) break;
     }
-
     return pages.join('\n\n').slice(0, localTextLimit);
   } catch (error) {
     console.warn('Local PDF text extraction skipped:', error.message);
     return '';
   }
 }
-
 async function extractLocalDocumentText(upload, fileBuffer) {
   const extension = path.extname(upload.original_filename || '').toLowerCase();
   const mediaType = upload.mime_type || '';
-
   if (mediaType === 'application/pdf' || extension === '.pdf') {
     return extractPdfText(fileBuffer);
   }
-
   if (extension === '.docx' || mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-    const { value } = await mammoth.extractRawText({ buffer: fileBuffer });
+    const {
+      value
+    } = await mammoth.extractRawText({
+      buffer: fileBuffer
+    });
     return String(value || '').replace(/\s+/g, ' ').trim().slice(0, localTextLimit);
   }
-
   if (mediaType.startsWith('text/') || extension === '.txt') {
     return fileBuffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, localTextLimit);
   }
-
   return '';
 }
-
 async function buildDocumentContent(upload, fileBuffer) {
   const extension = path.extname(upload.original_filename || '').toLowerCase();
   const mediaType = upload.mime_type || '';
   const localText = await extractLocalDocumentText(upload, fileBuffer);
-  const localTextPart = localText
-    ? [{
-        type: 'text',
-        text: `Local OCR/text extraction from ${upload.original_filename}:\n\n${localText}`
-      }]
-    : [];
-
+  const localTextPart = localText ? [{
+    type: 'text',
+    text: `Local OCR/text extraction from ${upload.original_filename}:\n\n${localText}`
+  }] : [];
   if (mediaType.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp'].includes(extension)) {
-    return [
-      ...localTextPart,
-      {
-        type: 'file',
-        data: fileBuffer,
-        mediaType: mediaType || `image/${extension.slice(1)}`,
-        filename: upload.original_filename
-      }
-    ];
+    return [...localTextPart, {
+      type: 'file',
+      data: fileBuffer,
+      mediaType: mediaType || `image/${extension.slice(1)}`,
+      filename: upload.original_filename
+    }];
   }
-
   if (mediaType === 'application/pdf' || extension === '.pdf') {
-    return [
-      ...localTextPart,
-      {
-        type: 'file',
-        data: fileBuffer,
-        mediaType: 'application/pdf',
-        filename: upload.original_filename
-      }
-    ];
+    return [...localTextPart, {
+      type: 'file',
+      data: fileBuffer,
+      mediaType: 'application/pdf',
+      filename: upload.original_filename
+    }];
   }
-
   if (extension === '.docx' || mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-    return localTextPart.length ? localTextPart : [{ type: 'text', text: 'No readable Word document text was extracted.' }];
+    return localTextPart.length ? localTextPart : [{
+      type: 'text',
+      text: 'No readable Word document text was extracted.'
+    }];
   }
-
   if (mediaType.startsWith('text/') || extension === '.txt') {
-    return localTextPart.length ? localTextPart : [{ type: 'text', text: 'No readable text was extracted.' }];
+    return localTextPart.length ? localTextPart : [{
+      type: 'text',
+      text: 'No readable text was extracted.'
+    }];
   }
-
   throw new Error('AI extraction currently supports PDF, image, DOCX, and text files. Convert legacy .doc files to PDF or DOCX.');
 }
-
 async function buildResponsesDocumentContent(upload, fileBuffer) {
   const extension = path.extname(upload.original_filename || '').toLowerCase();
   const mediaType = upload.mime_type || '';
   const localText = await extractLocalDocumentText(upload, fileBuffer);
   const content = [];
-
   if (localText) {
     content.push({
       type: 'input_text',
       text: `Local OCR/text extraction from ${upload.original_filename}:\n\n${localText}`
     });
   }
-
   if (mediaType === 'application/pdf' || extension === '.pdf') {
     content.push({
       type: 'input_file',
@@ -292,7 +271,6 @@ async function buildResponsesDocumentContent(upload, fileBuffer) {
     });
     return content;
   }
-
   if (mediaType.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp'].includes(extension)) {
     const imageType = mediaType || `image/${extension.slice(1)}`;
     content.push({
@@ -302,33 +280,34 @@ async function buildResponsesDocumentContent(upload, fileBuffer) {
     });
     return content;
   }
-
   if (extension === '.docx' || mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-    return content.length ? content : [{ type: 'input_text', text: 'No readable Word document text was extracted.' }];
+    return content.length ? content : [{
+      type: 'input_text',
+      text: 'No readable Word document text was extracted.'
+    }];
   }
-
   if (mediaType.startsWith('text/') || extension === '.txt') {
-    return content.length ? content : [{ type: 'input_text', text: 'No readable text was extracted.' }];
+    return content.length ? content : [{
+      type: 'input_text',
+      text: 'No readable text was extracted.'
+    }];
   }
-
   throw new Error('AI extraction currently supports PDF, image, DOCX, and text files. Convert legacy .doc files to PDF or DOCX.');
 }
-
 function extractResponseText(responseBody) {
   if (typeof responseBody?.output_text === 'string') return responseBody.output_text;
   const output = Array.isArray(responseBody?.output) ? responseBody.output : [];
-  return output
-    .flatMap((item) => Array.isArray(item.content) ? item.content : [])
-    .map((content) => content.text || '')
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+  return output.flatMap(item => Array.isArray(item.content) ? item.content : []).map(content => content.text || '').filter(Boolean).join('\n').trim();
 }
-
-async function generateDocumentExtractionWithOpenAi({ request, claim, templateFields, upload, fileBuffer }) {
+async function generateDocumentExtractionWithOpenAi({
+  request,
+  claim,
+  templateFields,
+  upload,
+  fileBuffer
+}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 180000);
-
   try {
     const response = await fetch(openAiResponsesUrl, {
       method: 'POST',
@@ -341,10 +320,14 @@ async function generateDocumentExtractionWithOpenAi({ request, claim, templateFi
         store: false,
         input: [{
           role: 'user',
-          content: [
-            { type: 'input_text', text: extractionInstructions({ request, claim, templateFields }) },
-            ...await buildResponsesDocumentContent(upload, fileBuffer)
-          ]
+          content: [{
+            type: 'input_text',
+            text: extractionInstructions({
+              request,
+              claim,
+              templateFields
+            })
+          }, ...(await buildResponsesDocumentContent(upload, fileBuffer))]
         }],
         text: {
           format: {
@@ -358,7 +341,6 @@ async function generateDocumentExtractionWithOpenAi({ request, claim, templateFi
       }),
       signal: controller.signal
     });
-
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(body?.error?.message || `OpenAI API request failed with HTTP ${response.status}`);
@@ -366,7 +348,6 @@ async function generateDocumentExtractionWithOpenAi({ request, claim, templateFi
     if (body?.status === 'failed') {
       throw new Error(body?.error?.message || 'OpenAI response failed');
     }
-
     const text = extractResponseText(body);
     const parsed = JSON.parse(text);
     return extractedDocumentSchema.parse(parsed);
@@ -379,8 +360,11 @@ async function generateDocumentExtractionWithOpenAi({ request, claim, templateFi
     clearTimeout(timeout);
   }
 }
-
-function extractionInstructions({ request, claim, templateFields }) {
+function extractionInstructions({
+  request,
+  claim,
+  templateFields
+}) {
   return `You extract structured data from South African Road Accident Fund claim documents.
 
 Document upload category: ${request.label}
@@ -404,16 +388,16 @@ Requirements:
 Attached template fields:
 ${JSON.stringify(templateFields.slice(0, 250))}`;
 }
-
-function updateRelevantClaimFields(firmDb, claim, extraction) {
-  const claimant = extraction.parties.find((party) => /claimant|client|patient|injured/i.test(party.role)) || extraction.parties[0] || {};
+async function updateRelevantClaimFields(firmDb, claim, extraction) {
+  const claimant = extraction.parties.find(party => /claimant|client|patient|injured/i.test(party.role)) || extraction.parties[0] || {};
   const claimantMatches = personMatchesClaim(claimant, claim);
   const bank = mergeMissing(parseJson(claim.banking_json), extraction.banking);
   const firstVehicle = extraction.accident.vehicles[0] || {};
-  const firstDriver = compactObject({ name: firstVehicle.driver_name });
-  const witnesses = extraction.accident.witnesses.map(compactObject).filter((item) => Object.keys(item).length);
-
-  firmDb.prepare(`
+  const firstDriver = compactObject({
+    name: firstVehicle.driver_name
+  });
+  const witnesses = extraction.accident.witnesses.map(compactObject).filter(item => Object.keys(item).length);
+  await firmDb.prepare(`
     UPDATE firm_clients
     SET
       id_number = CASE WHEN ? AND COALESCE(TRIM(id_number), '') = '' THEN ? ELSE id_number END,
@@ -425,19 +409,8 @@ function updateRelevantClaimFields(firmDb, claim, extraction) {
       banking_json = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(
-    claimantMatches ? 1 : 0,
-    claimant.id_number,
-    claimantMatches ? claimant.passport_number : null,
-    claimantMatches ? claimant.date_of_birth : null,
-    claimantMatches ? claimant.address : null,
-    claimantMatches ? extraction.employment.occupation : null,
-    claimantMatches ? extraction.employment.employer : null,
-    claimantMatches && Object.keys(compactObject(bank)).length ? JSON.stringify(compactObject(bank)) : claim.banking_json,
-    claim.client_id
-  );
-
-  firmDb.prepare(`
+  `).run(claimantMatches ? 1 : 0, claimant.id_number, claimantMatches ? claimant.passport_number : null, claimantMatches ? claimant.date_of_birth : null, claimantMatches ? claimant.address : null, claimantMatches ? extraction.employment.occupation : null, claimantMatches ? extraction.employment.employer : null, claimantMatches && Object.keys(compactObject(bank)).length ? JSON.stringify(compactObject(bank)) : claim.banking_json, claim.client_id);
+  await firmDb.prepare(`
     UPDATE raf_cases
     SET
       accident_date = CASE WHEN COALESCE(TRIM(accident_date), '') = '' THEN ? ELSE accident_date END,
@@ -452,23 +425,10 @@ function updateRelevantClaimFields(firmDb, claim, extraction) {
       witnesses_json = CASE WHEN COALESCE(TRIM(witnesses_json), '') = '' THEN ? ELSE witnesses_json END,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(
-    extraction.accident.date,
-    extraction.accident.time,
-    extraction.accident.location,
-    extraction.accident.police_station,
-    extraction.accident.police_case_number,
-    extraction.accident.claimant_role,
-    extraction.accident.description,
-    Object.keys(compactObject(firstVehicle)).length ? JSON.stringify(compactObject(firstVehicle)) : null,
-    Object.keys(firstDriver).length ? JSON.stringify(firstDriver) : null,
-    witnesses.length ? JSON.stringify(witnesses) : null,
-    claim.id
-  );
+  `).run(extraction.accident.date, extraction.accident.time, extraction.accident.location, extraction.accident.police_station, extraction.accident.police_case_number, extraction.accident.claimant_role, extraction.accident.description, Object.keys(compactObject(firstVehicle)).length ? JSON.stringify(compactObject(firstVehicle)) : null, Object.keys(firstDriver).length ? JSON.stringify(firstDriver) : null, witnesses.length ? JSON.stringify(witnesses) : null, claim.id);
 }
-
 function buildExtractedValueMap(extraction) {
-  const claimant = extraction.parties.find((party) => /claimant|client|patient|injured/i.test(party.role)) || extraction.parties[0] || {};
+  const claimant = extraction.parties.find(party => /claimant|client|patient|injured/i.test(party.role)) || extraction.parties[0] || {};
   const values = {
     first_name: claimant.first_name,
     surname: claimant.surname,
@@ -501,7 +461,6 @@ function buildExtractedValueMap(extraction) {
     branch_name: extraction.banking.branch_name,
     account_type: extraction.banking.account_type
   };
-
   const mapped = new Map();
   for (const [key, value] of Object.entries(values)) {
     if (hasValue(value)) mapped.set(normalizeKey(key), value);
@@ -514,23 +473,18 @@ function buildExtractedValueMap(extraction) {
   }
   return mapped;
 }
-
 async function autofillAttachedTemplates(firmDb, caseId, extraction) {
-  const attachments = firmDb.prepare('SELECT * FROM claim_form_templates WHERE case_id = ?').all(caseId);
+  const attachments = await firmDb.prepare('SELECT * FROM claim_form_templates WHERE case_id = ?').all(caseId);
   const extractedValues = buildExtractedValueMap(extraction);
   let filledCount = 0;
-
   for (const attachment of attachments) {
-    const template = db.prepare('SELECT * FROM document_templates WHERE id = ? AND status = ?').get(attachment.template_id, 'ready');
+    const template = await db.prepare('SELECT * FROM document_templates WHERE id = ? AND status = ?').get(attachment.template_id, 'ready');
     if (!template) continue;
-    const fields = getTemplateFields(template.id).map(serializeField);
+    const fields = (await getTemplateFields(template.id)).map(serializeField);
     if (!fields.length) continue;
-    const existingDocument = attachment.generated_document_id
-      ? db.prepare('SELECT * FROM generated_documents WHERE id = ?').get(attachment.generated_document_id)
-      : null;
+    const existingDocument = attachment.generated_document_id ? await db.prepare('SELECT * FROM generated_documents WHERE id = ?').get(attachment.generated_document_id) : null;
     const data = parseJson(existingDocument?.input_json, {});
     let changed = false;
-
     for (const field of fields) {
       if (hasValue(data[field.name])) continue;
       const extractedValue = extractedValues.get(normalizeKey(field.name)) || extractedValues.get(normalizeKey(field.label));
@@ -538,7 +492,6 @@ async function autofillAttachedTemplates(firmDb, caseId, extraction) {
       data[field.name] = extractedValue;
       changed = true;
     }
-
     if (!changed) continue;
     const document = await generateFilledPdf({
       template,
@@ -547,17 +500,15 @@ async function autofillAttachedTemplates(firmDb, caseId, extraction) {
       userId: existingDocument?.user_id || template.user_id,
       sourceType: 'ai_document_extraction'
     });
-    firmDb.prepare(`
+    await firmDb.prepare(`
       UPDATE claim_form_templates
       SET generated_document_id = ?, status = 'generated', updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(document.id, attachment.id);
     filledCount += 1;
   }
-
   return filledCount;
 }
-
 function buildClaimRecordContext(claim, firm) {
   return {
     firm: compactObject({
@@ -610,16 +561,17 @@ function buildClaimRecordContext(claim, firm) {
     }
   };
 }
-
-export async function reviewMissingTemplateFieldsWithAi({ claim, firm, fields, data }) {
-  const emptyFields = fields.filter((field) => !hasValue(data[field.name]));
-  const protectedFields = emptyFields.filter((field) => (
-    String(field.field_type || '').toLowerCase() === 'signature'
-    || /\b(signature|signed by|initials?)\b/i.test(`${field.name} ${field.label}`)
-  ));
-  const protectedNames = new Set(protectedFields.map((field) => field.name));
-  const reviewableFields = emptyFields.filter((field) => !protectedNames.has(field.name));
-  const protectedDecisions = protectedFields.map((field) => ({
+export async function reviewMissingTemplateFieldsWithAi({
+  claim,
+  firm,
+  fields,
+  data
+}) {
+  const emptyFields = fields.filter(field => !hasValue(data[field.name]));
+  const protectedFields = emptyFields.filter(field => String(field.field_type || '').toLowerCase() === 'signature' || /\b(signature|signed by|initials?)\b/i.test(`${field.name} ${field.label}`));
+  const protectedNames = new Set(protectedFields.map(field => field.name));
+  const reviewableFields = emptyFields.filter(field => !protectedNames.has(field.name));
+  const protectedDecisions = protectedFields.map(field => ({
     field_name: field.name,
     label: field.label,
     status: 'protected',
@@ -628,13 +580,17 @@ export async function reviewMissingTemplateFieldsWithAi({ claim, firm, fields, d
     reason: 'Signature and initial fields require a person to complete them.',
     confidence: 1
   }));
-
   if (!reviewableFields.length) {
-    return { checked: emptyFields.length, values: {}, decisions: protectedDecisions };
+    return {
+      checked: emptyFields.length,
+      values: {},
+      decisions: protectedDecisions
+    };
   }
-
-  const aiProfile = parseJson(claim.ai_structured_json, { documents: [] });
-  const documents = (Array.isArray(aiProfile.documents) ? aiProfile.documents : []).map((document) => {
+  const aiProfile = parseJson(claim.ai_structured_json, {
+    documents: []
+  });
+  const documents = (Array.isArray(aiProfile.documents) ? aiProfile.documents : []).map(document => {
     const extraction = document?.extraction || {};
     return {
       category: document.category,
@@ -654,29 +610,28 @@ export async function reviewMissingTemplateFieldsWithAi({ claim, firm, fields, d
   });
   const knownValues = Object.fromEntries(Object.entries(data || {}).filter(([, value]) => hasValue(value)));
   const recordContext = buildClaimRecordContext(claim, firm);
-
   if (!config.openAiApiKey || !documents.length) {
     return {
       checked: emptyFields.length,
       values: {},
-      decisions: [
-        ...protectedDecisions,
-        ...reviewableFields.map((field) => ({
-          field_name: field.name,
-          label: field.label,
-          status: 'no_evidence',
-          value: null,
-          source: null,
-          reason: documents.length ? 'AI field review is not configured.' : 'No extracted document evidence is available.',
-          confidence: 1
-        }))
-      ]
+      decisions: [...protectedDecisions, ...reviewableFields.map(field => ({
+        field_name: field.name,
+        label: field.label,
+        status: 'no_evidence',
+        value: null,
+        source: null,
+        reason: documents.length ? 'AI field review is not configured.' : 'No extracted document evidence is available.',
+        confidence: 1
+      }))]
     };
   }
-
   try {
-    const openai = createOpenAI({ apiKey: config.openAiApiKey });
-    const { output } = await generateText({
+    const openai = createOpenAI({
+      apiKey: config.openAiApiKey
+    });
+    const {
+      output
+    } = await generateText({
       model: openai(config.aiExtractionModel),
       output: Output.object({
         schema: templateFieldReviewSchema,
@@ -697,21 +652,21 @@ Rules:
 - The value must suit the field type. Confidence is from 0 to 1.
 
 Complete template input structure:
-${JSON.stringify(fields.map((field) => ({
-  field_name: field.name,
-  label: field.label,
-  field_type: field.field_type,
-  required: Boolean(field.required),
-  current_value: hasValue(data[field.name]) ? data[field.name] : null
-})))}
+${JSON.stringify(fields.map(field => ({
+        field_name: field.name,
+        label: field.label,
+        field_type: field.field_type,
+        required: Boolean(field.required),
+        current_value: hasValue(data[field.name]) ? data[field.name] : null
+      })))}
 
 Empty fields:
-${JSON.stringify(reviewableFields.map((field) => ({
-  field_name: field.name,
-  label: field.label,
-  field_type: field.field_type,
-  required: Boolean(field.required)
-})))}
+${JSON.stringify(reviewableFields.map(field => ({
+        field_name: field.name,
+        label: field.label,
+        field_type: field.field_type,
+        required: Boolean(field.required)
+      })))}
 
 Known populated record values:
 ${JSON.stringify(knownValues)}
@@ -721,11 +676,12 @@ ${JSON.stringify(recordContext)}
 
 Uploaded document evidence:
 ${JSON.stringify(documents)}`,
-      timeout: { totalMs: 120000 }
+      timeout: {
+        totalMs: 120000
+      }
     });
-
-    const returned = new Map((output.decisions || []).map((decision) => [decision.field_name, decision]));
-    const decisions = reviewableFields.map((field) => {
+    const returned = new Map((output.decisions || []).map(decision => [decision.field_name, decision]));
+    const decisions = reviewableFields.map(field => {
       const decision = returned.get(field.name);
       if (!decision) {
         return {
@@ -746,34 +702,34 @@ ${JSON.stringify(documents)}`,
         value: canFill ? decision.value : null
       };
     });
-    const values = Object.fromEntries(
-      decisions.filter((decision) => decision.status === 'fillable').map((decision) => [decision.field_name, decision.value])
-    );
-    return { checked: emptyFields.length, values, decisions: [...protectedDecisions, ...decisions] };
+    const values = Object.fromEntries(decisions.filter(decision => decision.status === 'fillable').map(decision => [decision.field_name, decision.value]));
+    return {
+      checked: emptyFields.length,
+      values,
+      decisions: [...protectedDecisions, ...decisions]
+    };
   } catch (error) {
     return {
       checked: emptyFields.length,
       values: {},
       error: String(error?.message || error).slice(0, 1000),
-      decisions: [
-        ...protectedDecisions,
-        ...reviewableFields.map((field) => ({
-          field_name: field.name,
-          label: field.label,
-          status: 'review_failed',
-          value: null,
-          source: null,
-          reason: 'AI could not review this field. Staff review is required.',
-          confidence: 0
-        }))
-      ]
+      decisions: [...protectedDecisions, ...reviewableFields.map(field => ({
+        field_name: field.name,
+        label: field.label,
+        status: 'review_failed',
+        value: null,
+        source: null,
+        reason: 'AI could not review this field. Staff review is required.',
+        confidence: 0
+      }))]
     };
   }
 }
-
-function saveConsolidatedExtraction(firmDb, claim, upload, request, extraction) {
-  const current = parseJson(claim.ai_structured_json, { documents: [] });
-  const documents = Array.isArray(current.documents) ? current.documents.filter((item) => Number(item.upload_id) !== Number(upload.id)) : [];
+async function saveConsolidatedExtraction(firmDb, claim, upload, request, extraction) {
+  const current = parseJson(claim.ai_structured_json, {
+    documents: []
+  });
+  const documents = Array.isArray(current.documents) ? current.documents.filter(item => Number(item.upload_id) !== Number(upload.id)) : [];
   documents.push({
     upload_id: upload.id,
     request_id: request.id,
@@ -782,28 +738,35 @@ function saveConsolidatedExtraction(firmDb, claim, upload, request, extraction) 
     processed_at: new Date().toISOString(),
     extraction
   });
-  const summaries = documents.map((item) => `${item.category}: ${item.extraction?.summary || ''}`).filter(Boolean);
-  const consolidated = { version: 1, documents, latest_upload_id: upload.id };
-
-  firmDb.prepare(`
+  const summaries = documents.map(item => `${item.category}: ${item.extraction?.summary || ''}`).filter(Boolean);
+  const consolidated = {
+    version: 1,
+    documents,
+    latest_upload_id: upload.id
+  };
+  await firmDb.prepare(`
     UPDATE raf_cases
     SET ai_structured_json = ?, ai_summary = ?, ai_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(JSON.stringify(consolidated), summaries.join('\n'), claim.id);
-
-  firmDb.prepare(`
+  await firmDb.prepare(`
     UPDATE client_uploads
     SET ai_status = 'completed', ai_model = ?, ai_extracted_json = ?, ai_summary = ?, ai_error = NULL,
       ai_processed_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(config.aiExtractionModel, JSON.stringify(extraction), extraction.summary, upload.id);
 }
-
-export async function processUploadedDocumentWithAi({ firmDb, uploadId }) {
-  const upload = firmDb.prepare('SELECT * FROM client_uploads WHERE id = ?').get(uploadId);
-  if (!upload) return { status: 'error', error: 'Upload record not found' };
-  const request = firmDb.prepare('SELECT * FROM client_document_requests WHERE id = ?').get(upload.request_id);
-  const claim = request ? firmDb.prepare(`
+export async function processUploadedDocumentWithAi({
+  firmDb,
+  uploadId
+}) {
+  const upload = await firmDb.prepare('SELECT * FROM client_uploads WHERE id = ?').get(uploadId);
+  if (!upload) return {
+    status: 'error',
+    error: 'Upload record not found'
+  };
+  const request = await firmDb.prepare('SELECT * FROM client_document_requests WHERE id = ?').get(upload.request_id);
+  const claim = request ? await firmDb.prepare(`
     SELECT raf_cases.*, firm_clients.first_name, firm_clients.surname, firm_clients.id_number,
       firm_clients.passport_number, firm_clients.date_of_birth, firm_clients.residential_address,
       firm_clients.occupation, firm_clients.employer_details, firm_clients.banking_json
@@ -811,50 +774,68 @@ export async function processUploadedDocumentWithAi({ firmDb, uploadId }) {
     JOIN firm_clients ON firm_clients.id = raf_cases.client_id
     WHERE raf_cases.id = ?
   `).get(request.case_id) : null;
-
-  if (!request || !claim) return { status: 'error', error: 'Claim document request was not found' };
+  if (!request || !claim) return {
+    status: 'error',
+    error: 'Claim document request was not found'
+  };
   if (!config.openAiApiKey) {
     const error = 'OPENAI_API_KEY is not configured';
-    firmDb.prepare(`
+    await firmDb.prepare(`
       UPDATE client_uploads SET ai_status = 'skipped', ai_error = ?, ai_processed_at = CURRENT_TIMESTAMP WHERE id = ?
     `).run(error, upload.id);
-    return { status: 'skipped', error };
+    return {
+      status: 'skipped',
+      error
+    };
   }
-
   try {
-    firmDb.prepare("UPDATE client_uploads SET ai_status = 'processing', ai_error = NULL WHERE id = ?").run(upload.id);
+    await firmDb.prepare("UPDATE client_uploads SET ai_status = 'processing', ai_error = NULL WHERE id = ?").run(upload.id);
     const filePath = resolveInside(clientUploadsDir, upload.stored_filename);
     const fileBuffer = fs.readFileSync(filePath);
-    const templateFields = buildTemplateFieldPrompt(firmDb, claim.id);
-    const output = await generateDocumentExtractionWithOpenAi({ request, claim, templateFields, upload, fileBuffer });
-    const extractedClaimant = output.parties.find((party) => /claimant|client|patient|injured/i.test(party.role)) || output.parties[0] || {};
+    const templateFields = await buildTemplateFieldPrompt(firmDb, claim.id);
+    const output = await generateDocumentExtractionWithOpenAi({
+      request,
+      claim,
+      templateFields,
+      upload,
+      fileBuffer
+    });
+    const extractedClaimant = output.parties.find(party => /claimant|client|patient|injured/i.test(party.role)) || output.parties[0] || {};
     const identityMismatch = !personMatchesClaim(extractedClaimant, claim);
     if (identityMismatch) {
-      output.warnings = [
-        ...(Array.isArray(output.warnings) ? output.warnings : []),
-        `Extracted person details do not match matter client ${claim.first_name} ${claim.surname}. Verify this upload before relying on it.`
-      ];
-      saveConsolidatedExtraction(firmDb, claim, upload, request, output);
+      output.warnings = [...(Array.isArray(output.warnings) ? output.warnings : []), `Extracted person details do not match matter client ${claim.first_name} ${claim.surname}. Verify this upload before relying on it.`];
+      await saveConsolidatedExtraction(firmDb, claim, upload, request, output);
       const reviewMessage = `Extracted person details do not match matter client ${claim.first_name} ${claim.surname}. Staff review is required before using this document.`;
-      firmDb.prepare(`
+      await firmDb.prepare(`
         UPDATE client_uploads
         SET ai_status = 'review_required', ai_model = ?, ai_error = ?, ai_processed_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(config.aiExtractionModel, reviewMessage, upload.id);
-      return { status: 'review_required', extraction: output, filledTemplates: 0, error: reviewMessage };
+      return {
+        status: 'review_required',
+        extraction: output,
+        filledTemplates: 0,
+        error: reviewMessage
+      };
     }
-
-    updateRelevantClaimFields(firmDb, claim, output);
-    saveConsolidatedExtraction(firmDb, claim, upload, request, output);
+    await updateRelevantClaimFields(firmDb, claim, output);
+    await saveConsolidatedExtraction(firmDb, claim, upload, request, output);
     const filledTemplates = await autofillAttachedTemplates(firmDb, claim.id, output);
-    return { status: 'completed', extraction: output, filledTemplates };
+    return {
+      status: 'completed',
+      extraction: output,
+      filledTemplates
+    };
   } catch (error) {
     const message = String(error?.message || error).slice(0, 2000);
-    firmDb.prepare(`
+    await firmDb.prepare(`
       UPDATE client_uploads
       SET ai_status = 'failed', ai_model = ?, ai_error = ?, ai_processed_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(config.aiExtractionModel, message, upload.id);
-    return { status: 'failed', error: message };
+    return {
+      status: 'failed',
+      error: message
+    };
   }
 }

@@ -66,7 +66,7 @@ export default function FirmsPage() {
       firm.contact_email,
       firm.contact_phone,
       firm.address,
-      firm.database_filename
+      firm.database_name
     ].filter(Boolean).join(' ').toLowerCase();
 
     const matchesSearch = searchText.includes(searchTerm.trim().toLowerCase());
@@ -314,7 +314,7 @@ export default function FirmsPage() {
                     <td data-label="Phone">{firm.contact_phone || '-'}</td>
                     <td data-label="Address">{firm.address || '-'}</td>
                     <td data-label="Status"><span className={`status-pill ${firm.status}`}>{firm.status}</span></td>
-                    <td data-label="Database"><code>{firm.database_filename}</code></td>
+                    <td data-label="Database"><code>{firm.database_name}</code></td>
                     <td data-label="Created">{new Date(firm.created_at).toLocaleDateString()}</td>
                     <td data-label="Action">
                       <div className="table-actions">

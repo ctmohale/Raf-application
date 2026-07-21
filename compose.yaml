@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:4000}
+      MYSQL_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-orc-local-root-password}@mysql:3306/orc_document_automation
+      UPLOADS_DIR: /app/storage/uploads
+    ports:
+      - "${APP_PORT:-4000}:4000"
+    volumes:
+      - app-storage:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-orc-local-root-password}
+      MYSQL_DATABASE: orc_document_automation
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-orc-local-root-password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  app-storage:
+  mysql-data:

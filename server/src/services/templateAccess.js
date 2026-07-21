@@ -1,15 +1,13 @@
 import { db } from '../db/db.js';
-
-export function getOwnedTemplate(templateId, userId) {
-  return db.prepare(`
+export async function getOwnedTemplate(templateId, userId) {
+  return await db.prepare(`
     SELECT *
     FROM document_templates
     WHERE id = ? AND user_id = ?
   `).get(templateId, userId);
 }
-
-export function getTemplateFields(templateId) {
-  return db.prepare(`
+export async function getTemplateFields(templateId) {
+  return await db.prepare(`
     SELECT *
     FROM template_fields
     WHERE template_id = ?

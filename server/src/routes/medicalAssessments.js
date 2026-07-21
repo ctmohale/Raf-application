@@ -4,16 +4,8 @@ import { db, serializeField, serializeTemplate } from '../db/db.js';
 import { originalsDir, resolveInside } from '../config.js';
 import { openFirmDatabase } from '../services/firmDatabases.js';
 import { getTemplateFields } from '../services/templateAccess.js';
-
 export const medicalAssessmentsRouter = express.Router();
-
-const medicalReportTypes = new Map([
-  ['raf_1_medical_section', 'RAF 1 medical section'],
-  ['raf_4_serious_injury', 'RAF 4 serious-injury assessment'],
-  ['supporting_medical_report', 'General supporting medical report'],
-  ['specialist_report', 'Additional specialist report']
-]);
-
+const medicalReportTypes = new Map([['raf_1_medical_section', 'RAF 1 medical section'], ['raf_4_serious_injury', 'RAF 4 serious-injury assessment'], ['supporting_medical_report', 'General supporting medical report'], ['specialist_report', 'Additional specialist report']]);
 function parseJson(value, fallback = {}) {
   if (!value) return fallback;
   try {
@@ -22,42 +14,22 @@ function parseJson(value, fallback = {}) {
     return fallback;
   }
 }
-
 function firstValue(...values) {
-  return values.find((value) => value !== undefined && value !== null && String(value).trim() !== '') || '';
+  return values.find(value => value !== undefined && value !== null && String(value).trim() !== '') || '';
 }
-
 function isEnabled(value, fallback = false) {
   if (value === undefined || value === null) return fallback;
   return value === true || value === 1 || value === '1';
 }
-
 function cleanAssessmentValues(values = {}) {
-  const allowedFields = [
-    'examination_date',
-    'injuries',
-    'clinical_findings',
-    'diagnosis',
-    'treatment',
-    'impairment',
-    'recommendations',
-    'notes'
-  ];
-  return Object.fromEntries(
-    allowedFields.map((field) => [field, String(values[field] || '').trim()])
-  );
+  const allowedFields = ['examination_date', 'injuries', 'clinical_findings', 'diagnosis', 'treatment', 'impairment', 'recommendations', 'notes'];
+  return Object.fromEntries(allowedFields.map(field => [field, String(values[field] || '').trim()]));
 }
-
 function normalizeKey(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
-
-function findTemplateForReport(reportType) {
-  const templates = db.prepare(`
+async function findTemplateForReport(reportType) {
+  const templates = await db.prepare(`
     SELECT document_templates.*, COUNT(template_fields.id) AS field_count
     FROM document_templates
     LEFT JOIN template_fields ON template_fields.template_id = document_templates.id
@@ -65,24 +37,20 @@ function findTemplateForReport(reportType) {
     GROUP BY document_templates.id
     ORDER BY document_templates.updated_at DESC, document_templates.id DESC
   `).all();
-
   if (reportType === 'raf_1_medical_section') {
-    return templates.find((template) => {
+    return templates.find(template => {
       const name = normalizeKey(template.name);
       return name.includes('raf_1') || name === 'raf1' || name.includes('rafclaimform_1');
     }) || null;
   }
-
   if (reportType === 'raf_4_serious_injury') {
-    return templates.find((template) => {
+    return templates.find(template => {
       const name = normalizeKey(template.name);
       return name.includes('raf_4') || name === 'raf4' || name.includes('rafclaimform_4');
     }) || null;
   }
-
   return null;
 }
-
 function buildTemplateFallbackValues(fields, firm, row) {
   const patientName = [row.first_name, row.surname].filter(Boolean).join(' ');
   const representative = parseJson(row.representative_json, {});
@@ -90,7 +58,6 @@ function buildTemplateFallbackValues(fields, firm, row) {
   const vehicle = parseJson(row.vehicle_json, {});
   const driver = parseJson(row.driver_json, {});
   const owner = parseJson(row.owner_json, {});
-
   const fallbackByKey = {
     name_and_surname: patientName,
     title_name_and_surname: patientName,
@@ -155,7 +122,6 @@ function buildTemplateFallbackValues(fields, firm, row) {
     practice_number: row.practice_number || '',
     practice_number_hpcsa_and_or_bhf: row.practice_number || ''
   };
-
   return fields.reduce((values, field) => {
     const byName = fallbackByKey[normalizeKey(field.name)];
     const byLabel = fallbackByKey[normalizeKey(field.label)];
@@ -164,40 +130,33 @@ function buildTemplateFallbackValues(fields, firm, row) {
     return values;
   }, {});
 }
-
 function mergeValuesWithFallback(fallbackValues, savedValues) {
-  return Object.entries({ ...fallbackValues, ...savedValues }).reduce((values, [key, value]) => {
+  return Object.entries({
+    ...fallbackValues,
+    ...savedValues
+  }).reduce((values, [key, value]) => {
     const savedValue = savedValues[key];
     const fallbackValue = fallbackValues[key];
-    values[key] = savedValue === undefined || savedValue === null || String(savedValue).trim() === ''
-      ? fallbackValue ?? ''
-      : savedValue;
+    values[key] = savedValue === undefined || savedValue === null || String(savedValue).trim() === '' ? fallbackValue ?? '' : savedValue;
     return values;
   }, {});
 }
-
 function cleanTemplateValues(values = {}, fields = []) {
   const allowedKeys = new Set();
-  fields.forEach((field) => {
+  fields.forEach(field => {
     allowedKeys.add(field.name);
     allowedKeys.add(`${field.name}__field_${field.id}`);
   });
-
-  return Object.fromEntries(
-    Object.entries(values)
-      .filter(([key]) => allowedKeys.has(key))
-      .map(([key, value]) => [key, typeof value === 'boolean' ? value : String(value ?? '').trim()])
-  );
+  return Object.fromEntries(Object.entries(values).filter(([key]) => allowedKeys.has(key)).map(([key, value]) => [key, typeof value === 'boolean' ? value : String(value ?? '').trim()]));
 }
-
-function getAssessmentByToken(tokenValue) {
+async function getAssessmentByToken(tokenValue) {
   const token = String(tokenValue || '').trim();
-  const firms = db.prepare("SELECT * FROM firms WHERE status = 'active' ORDER BY id").all();
+  const firms = await db.prepare("SELECT * FROM firms WHERE status = 'active' ORDER BY id").all();
   for (const firm of firms) {
-    const firmDb = openFirmDatabase(firm);
+    const firmDb = await openFirmDatabase(firm);
     let keepOpen = false;
     try {
-      const row = firmDb.prepare(`
+      const row = await firmDb.prepare(`
         SELECT
           medical_assessment_requests.*,
           firm_clients.first_name,
@@ -227,29 +186,30 @@ function getAssessmentByToken(tokenValue) {
         JOIN raf_cases ON raf_cases.id = medical_assessment_requests.case_id
         WHERE medical_assessment_requests.secure_token = ?
       `).get(token);
-
       if (row) {
         keepOpen = true;
-        return { firm, firmDb, row };
+        return {
+          firm,
+          firmDb,
+          row
+        };
       }
     } finally {
-      if (!keepOpen) firmDb.close();
+      if (!keepOpen) await firmDb.close();
     }
   }
-
   return null;
 }
-
-function serializeAssessmentPayload(firm, row) {
-  const template = findTemplateForReport(row.report_type);
-  const fields = template ? getTemplateFields(template.id).map(serializeField) : [];
+async function serializeAssessmentPayload(firm, row) {
+  const template = await findTemplateForReport(row.report_type);
+  const fields = template ? (await getTemplateFields(template.id)).map(serializeField) : [];
   const savedValues = parseJson(row.assessment_json, {});
   const inheritClientInformation = isEnabled(row.inherit_client_information, true);
   const lockPrefilledFields = isEnabled(row.lock_prefilled_fields, true);
   const hidePrefilledFields = isEnabled(row.hide_prefilled_fields, false);
   const fallbackValues = template && inheritClientInformation ? buildTemplateFallbackValues(fields, firm, row) : {};
-  const inheritedKeys = new Set(Object.keys(fallbackValues).filter((key) => String(fallbackValues[key] || '').trim() !== ''));
-  const templateFields = fields.map((field) => {
+  const inheritedKeys = new Set(Object.keys(fallbackValues).filter(key => String(fallbackValues[key] || '').trim() !== ''));
+  const templateFields = fields.map(field => {
     const inherited = inheritedKeys.has(field.name) || inheritedKeys.has(`${field.name}__field_${field.id}`);
     return {
       ...field,
@@ -258,9 +218,12 @@ function serializeAssessmentPayload(firm, row) {
       hidden: inherited && hidePrefilledFields
     };
   });
-
   return {
-    firm: { name: firm.name, contact_email: firm.contact_email, contact_phone: firm.contact_phone },
+    firm: {
+      name: firm.name,
+      contact_email: firm.contact_email,
+      contact_phone: firm.contact_phone
+    },
     assessment: {
       report_type: row.report_type,
       report_label: medicalReportTypes.get(row.report_type) || 'Medical assessment',
@@ -295,69 +258,81 @@ function serializeAssessmentPayload(firm, row) {
     }
   };
 }
-
-medicalAssessmentsRouter.get('/:token', (req, res) => {
+medicalAssessmentsRouter.get('/:token', async (req, res) => {
   const token = String(req.params.token || '').trim();
-  if (!token) return res.status(404).json({ error: 'Assessment link not found' });
-
-  const match = getAssessmentByToken(token);
-  if (!match) return res.status(404).json({ error: 'Assessment link not found' });
-
-  const { firm, firmDb, row } = match;
+  if (!token) return res.status(404).json({
+    error: 'Assessment link not found'
+  });
+  const match = await getAssessmentByToken(token);
+  if (!match) return res.status(404).json({
+    error: 'Assessment link not found'
+  });
+  const {
+    firm,
+    firmDb,
+    row
+  } = match;
   try {
-    return res.json(serializeAssessmentPayload(firm, row));
+    return res.json(await serializeAssessmentPayload(firm, row));
   } finally {
-    firmDb.close();
+    await firmDb.close();
   }
 });
-
-medicalAssessmentsRouter.get('/:token/template/pdf', (req, res) => {
+medicalAssessmentsRouter.get('/:token/template/pdf', async (req, res) => {
   const token = String(req.params.token || '').trim();
-  if (!token) return res.status(404).json({ error: 'Assessment link not found' });
-
-  const match = getAssessmentByToken(token);
-  if (!match) return res.status(404).json({ error: 'Assessment link not found' });
-
-  const { firmDb, row } = match;
+  if (!token) return res.status(404).json({
+    error: 'Assessment link not found'
+  });
+  const match = await getAssessmentByToken(token);
+  if (!match) return res.status(404).json({
+    error: 'Assessment link not found'
+  });
+  const {
+    firmDb,
+    row
+  } = match;
   try {
-    const template = findTemplateForReport(row.report_type);
-    if (!template) return res.status(404).json({ error: 'Assessment template not found' });
-
+    const template = await findTemplateForReport(row.report_type);
+    if (!template) return res.status(404).json({
+      error: 'Assessment template not found'
+    });
     const filePath = resolveInside(originalsDir, template.stored_filename);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'PDF is missing from storage' });
-
+    if (!fs.existsSync(filePath)) return res.status(404).json({
+      error: 'PDF is missing from storage'
+    });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${template.original_filename}"`);
     return fs.createReadStream(filePath).pipe(res);
   } finally {
-    firmDb.close();
+    await firmDb.close();
   }
 });
-
-medicalAssessmentsRouter.patch('/:token', (req, res) => {
+medicalAssessmentsRouter.patch('/:token', async (req, res) => {
   const token = String(req.params.token || '').trim();
-  if (!token) return res.status(404).json({ error: 'Assessment link not found' });
-
-  const match = getAssessmentByToken(token);
-  if (!match) return res.status(404).json({ error: 'Assessment link not found' });
-
-  const { firm, firmDb, row } = match;
+  if (!token) return res.status(404).json({
+    error: 'Assessment link not found'
+  });
+  const match = await getAssessmentByToken(token);
+  if (!match) return res.status(404).json({
+    error: 'Assessment link not found'
+  });
+  const {
+    firm,
+    firmDb,
+    row
+  } = match;
   try {
-    const template = findTemplateForReport(row.report_type);
-    const fields = template ? getTemplateFields(template.id).map(serializeField) : [];
-    const fallbackValues = template && isEnabled(row.inherit_client_information, true)
-      ? buildTemplateFallbackValues(fields, firm, row)
-      : {};
-    const values = template
-      ? cleanTemplateValues(req.body?.values || {}, fields)
-      : cleanAssessmentValues(req.body?.values || {});
+    const template = await findTemplateForReport(row.report_type);
+    const fields = template ? (await getTemplateFields(template.id)).map(serializeField) : [];
+    const fallbackValues = template && isEnabled(row.inherit_client_information, true) ? buildTemplateFallbackValues(fields, firm, row) : {};
+    const values = template ? cleanTemplateValues(req.body?.values || {}, fields) : cleanAssessmentValues(req.body?.values || {});
     if (template && (isEnabled(row.lock_prefilled_fields, true) || isEnabled(row.hide_prefilled_fields, false))) {
       Object.entries(fallbackValues).forEach(([key, value]) => {
         if (String(value || '').trim() !== '') values[key] = value;
       });
     }
     const submit = Boolean(req.body?.submit);
-    firmDb.prepare(`
+    await firmDb.prepare(`
       UPDATE medical_assessment_requests
       SET assessment_json = ?,
           status = ?,
@@ -365,8 +340,7 @@ medicalAssessmentsRouter.patch('/:token', (req, res) => {
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(JSON.stringify(values), submit ? 'submitted' : row.status, submit ? 1 : 0, row.id);
-
-    const updated = firmDb.prepare(`
+    const updated = await firmDb.prepare(`
       SELECT
         medical_assessment_requests.*,
         firm_clients.first_name,
@@ -396,9 +370,8 @@ medicalAssessmentsRouter.patch('/:token', (req, res) => {
       JOIN raf_cases ON raf_cases.id = medical_assessment_requests.case_id
       WHERE medical_assessment_requests.id = ?
     `).get(row.id);
-
-    return res.json(serializeAssessmentPayload(firm, updated));
+    return res.json(await serializeAssessmentPayload(firm, updated));
   } finally {
-    firmDb.close();
+    await firmDb.close();
   }
 });

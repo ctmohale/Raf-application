@@ -1,16 +1,13 @@
 import express from 'express';
 import { db } from '../db/db.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
-
 export const usersRouter = express.Router();
-
 const allowedRoles = new Set(['admin', 'staff', 'viewer']);
 const allowedStatuses = new Set(['pending', 'active', 'suspended']);
 const allowedFirmAccessLevels = new Set(['staff', 'viewer']);
 const allowedThemes = new Set(['light', 'dark']);
-
-function serializeUser(row) {
-  const firmAccess = db.prepare(`
+async function serializeUser(row) {
+  const firmAccess = (await db.prepare(`
     SELECT
       user_firm_access.firm_id,
       user_firm_access.access_level,
@@ -24,11 +21,10 @@ function serializeUser(row) {
     JOIN firms ON firms.id = user_firm_access.firm_id
     WHERE user_firm_access.user_id = ?
     ORDER BY firms.name COLLATE NOCASE
-  `).all(row.id).map((access) => ({
+  `).all(row.id)).map(access => ({
     ...access,
     can_submit_claims: Boolean(access.can_submit_claims)
   }));
-
   return {
     id: row.id,
     name: row.name,
@@ -42,9 +38,8 @@ function serializeUser(row) {
     firm_access: firmAccess
   };
 }
-
-function listUsers() {
-  return db.prepare(`
+async function listUsers() {
+  const users = await db.prepare(`
     SELECT id, name, email, role, status, approved_by_user_id, approved_at, created_at, updated_at
     FROM users
     ORDER BY
@@ -54,108 +49,123 @@ function listUsers() {
         ELSE 2
       END,
       created_at DESC
-  `).all().map(serializeUser);
+  `).all();
+  return Promise.all(users.map(serializeUser));
 }
-
-function activeAdminCount(excludeUserId = null) {
-  const params = excludeUserId ? { excludeUserId } : {};
-  const excludeClause = excludeUserId ? 'AND id != @excludeUserId' : '';
-  return db.prepare(`
+async function activeAdminCount(excludeUserId = null) {
+  const params = excludeUserId ? {
+    excludeUserId
+  } : {};
+  const excludeClause = excludeUserId ? 'AND id != :excludeUserId' : '';
+  return (await db.prepare(`
     SELECT COUNT(*) AS count
     FROM users
     WHERE role = 'admin' AND status = 'active' ${excludeClause}
-  `).get(params).count;
+  `).get(params)).count;
 }
-
-usersRouter.get('/me/settings', authenticate, (req, res) => {
-  const setting = db.prepare("SELECT value FROM user_settings WHERE user_id = ? AND key = 'theme'").get(req.user.id);
-  return res.json({ settings: { theme: setting?.value === 'dark' ? 'dark' : 'light' } });
+usersRouter.get('/me/settings', authenticate, async (req, res) => {
+  const setting = await db.prepare("SELECT value FROM user_settings WHERE user_id = ? AND `key` = 'theme'").get(req.user.id);
+  return res.json({
+    settings: {
+      theme: setting?.value === 'dark' ? 'dark' : 'light'
+    }
+  });
 });
-
-usersRouter.patch('/me/settings', authenticate, (req, res) => {
+usersRouter.patch('/me/settings', authenticate, async (req, res) => {
   const theme = String(req.body?.theme || '').trim();
-  if (!allowedThemes.has(theme)) return res.status(400).json({ error: 'Choose light or dark theme' });
-
-  db.prepare(`
-    INSERT INTO user_settings (user_id, key, value, updated_at)
+  if (!allowedThemes.has(theme)) return res.status(400).json({
+    error: 'Choose light or dark theme'
+  });
+  await db.prepare(`
+    INSERT INTO user_settings (user_id, \`key\`, value, updated_at)
     VALUES (?, 'theme', ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id, key) DO UPDATE SET
-      value = excluded.value,
+    ON DUPLICATE KEY UPDATE
+      value = VALUES(value),
       updated_at = CURRENT_TIMESTAMP
   `).run(req.user.id, theme);
-
-  return res.json({ settings: { theme } });
+  return res.json({
+    settings: {
+      theme
+    }
+  });
 });
-
 usersRouter.use(authenticate, requireAdmin);
-
-usersRouter.get('/', (_req, res) => {
-  const firms = db.prepare(`
+usersRouter.get('/', async (_req, res) => {
+  const firms = await db.prepare(`
     SELECT id, name, slug, status
     FROM firms
     ORDER BY name COLLATE NOCASE
   `).all();
-  res.json({ users: listUsers(), firms });
+  res.json({
+    users: await listUsers(),
+    firms
+  });
 });
-
-usersRouter.patch('/:id/access', (req, res) => {
-  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!target) return res.status(404).json({ error: 'User not found' });
-
+usersRouter.patch('/:id/access', async (req, res) => {
+  const target = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!target) return res.status(404).json({
+    error: 'User not found'
+  });
   const role = String(req.body?.role || target.role).trim();
   const status = String(req.body?.status || target.status).trim();
   const hasFirmId = req.body?.firm_id !== null && req.body?.firm_id !== undefined && req.body?.firm_id !== '';
   const firmId = hasFirmId ? Number(req.body.firm_id) : null;
   const firmAccessLevel = String(req.body?.firm_access_level || 'staff').trim();
-  if (!allowedRoles.has(role)) return res.status(400).json({ error: 'Choose a valid access role' });
-  if (!allowedStatuses.has(status)) return res.status(400).json({ error: 'Choose a valid account status' });
-  if (hasFirmId && (!Number.isInteger(firmId) || firmId < 1)) return res.status(400).json({ error: 'Choose a valid law firm workspace' });
-  if (firmId && !allowedFirmAccessLevels.has(firmAccessLevel)) return res.status(400).json({ error: 'Choose a valid firm access level' });
-
+  if (!allowedRoles.has(role)) return res.status(400).json({
+    error: 'Choose a valid access role'
+  });
+  if (!allowedStatuses.has(status)) return res.status(400).json({
+    error: 'Choose a valid account status'
+  });
+  if (hasFirmId && (!Number.isInteger(firmId) || firmId < 1)) return res.status(400).json({
+    error: 'Choose a valid law firm workspace'
+  });
+  if (firmId && !allowedFirmAccessLevels.has(firmAccessLevel)) return res.status(400).json({
+    error: 'Choose a valid firm access level'
+  });
   if (firmId) {
-    const firm = db.prepare('SELECT id FROM firms WHERE id = ?').get(firmId);
-    if (!firm) return res.status(400).json({ error: 'Choose a valid law firm workspace' });
+    const firm = await db.prepare('SELECT id FROM firms WHERE id = ?').get(firmId);
+    if (!firm) return res.status(400).json({
+      error: 'Choose a valid law firm workspace'
+    });
   }
-
   const isSelf = Number(target.id) === Number(req.user.id);
   const removesAdminAccess = target.role === 'admin' && (role !== 'admin' || status !== 'active');
   if (isSelf && (role !== target.role || status !== target.status)) {
-    return res.status(400).json({ error: 'Ask another active admin to change your own access' });
+    return res.status(400).json({
+      error: 'Ask another active admin to change your own access'
+    });
   }
-  if (removesAdminAccess && activeAdminCount(target.id) < 1) {
-    return res.status(400).json({ error: 'At least one active admin is required' });
+  if (removesAdminAccess && (await activeAdminCount(target.id)) < 1) {
+    return res.status(400).json({
+      error: 'At least one active admin is required'
+    });
   }
-
-  const approvedAt = status === 'active'
-    ? target.approved_at || new Date().toISOString()
-    : target.approved_at;
-  const approvedBy = status === 'active'
-    ? target.approved_by_user_id || req.user.id
-    : target.approved_by_user_id;
+  const approvedAt = status === 'active' ? target.approved_at || new Date().toISOString() : target.approved_at;
+  const approvedBy = status === 'active' ? target.approved_by_user_id || req.user.id : target.approved_by_user_id;
   const effectiveFirmAccessLevel = role === 'viewer' ? 'viewer' : firmAccessLevel;
-
-  const updateAccess = db.transaction(() => {
-    db.prepare(`
+  const updateAccess = db.transaction(async () => {
+    await db.prepare(`
       UPDATE users
       SET role = ?, status = ?, approved_by_user_id = ?, approved_at = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(role, status, approvedBy, approvedAt, target.id);
-
-    db.prepare('DELETE FROM user_firm_access WHERE user_id = ?').run(target.id);
+    await db.prepare('DELETE FROM user_firm_access WHERE user_id = ?').run(target.id);
     if (firmId && role !== 'admin') {
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO user_firm_access (user_id, firm_id, access_level)
         VALUES (?, ?, ?)
       `).run(target.id, firmId, effectiveFirmAccessLevel);
     }
   });
-  updateAccess();
-
-  const user = db.prepare(`
+  await updateAccess();
+  const user = await db.prepare(`
     SELECT id, name, email, role, status, approved_by_user_id, approved_at, created_at, updated_at
     FROM users
     WHERE id = ?
   `).get(target.id);
-
-  return res.json({ user: serializeUser(user), users: listUsers() });
+  return res.json({
+    user: await serializeUser(user),
+    users: await listUsers()
+  });
 });

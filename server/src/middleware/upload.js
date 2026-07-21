@@ -5,7 +5,6 @@ import { randomUUID } from 'node:crypto';
 import { clientUploadsDir, config, originalsDir, spreadsheetsDir } from '../config.js';
 import { db } from '../db/db.js';
 import { openFirmDatabase } from '../services/firmDatabases.js';
-
 function diskStorageFor(destination) {
   return multer.diskStorage({
     destination,
@@ -15,42 +14,37 @@ function diskStorageFor(destination) {
     }
   });
 }
-
 function uploadError(message, status = 400) {
   const error = new Error(message);
   error.status = status;
   return error;
 }
-
-function findFirmForClientUpload(req) {
+async function findFirmForClientUpload(req) {
   if (req.params.id) {
-    return db.prepare('SELECT * FROM firms WHERE id = ? OR slug = ?').get(req.params.id, req.params.id);
+    return await db.prepare('SELECT * FROM firms WHERE id = ? OR slug = ?').get(req.params.id, req.params.id);
   }
-
   if (!req.params.token) return null;
-  const firms = db.prepare("SELECT * FROM firms WHERE status = 'active'").all();
-
+  const firms = await db.prepare("SELECT * FROM firms WHERE status = 'active'").all();
   for (const firm of firms) {
-    const firmDb = openFirmDatabase(firm);
+    const firmDb = await openFirmDatabase(firm);
     try {
-      const client = firmDb.prepare('SELECT id FROM firm_clients WHERE invite_token = ?').get(req.params.token);
+      const client = await firmDb.prepare('SELECT id FROM firm_clients WHERE invite_token = ?').get(req.params.token);
       if (client) return firm;
     } finally {
-      firmDb.close();
+      await firmDb.close();
     }
   }
-
   return null;
 }
-
 const clientDocumentStorage = multer.diskStorage({
-  destination: (req, _file, cb) => {
+  destination: async (req, _file, cb) => {
     try {
-      const firm = findFirmForClientUpload(req);
+      const firm = await findFirmForClientUpload(req);
       if (!firm) return cb(uploadError('Firm not found for document upload', 404));
-
       const destination = path.join(clientUploadsDir, firm.slug);
-      fs.mkdirSync(destination, { recursive: true });
+      fs.mkdirSync(destination, {
+        recursive: true
+      });
       req.uploadFirm = firm;
       cb(null, destination);
     } catch (error) {
@@ -64,29 +58,32 @@ const clientDocumentStorage = multer.diskStorage({
     cb(null, filename);
   }
 });
-
 export const pdfUpload = multer({
   storage: diskStorageFor(originalsDir),
-  limits: { fileSize: config.maxUploadMb * 1024 * 1024 },
+  limits: {
+    fileSize: config.maxUploadMb * 1024 * 1024
+  },
   fileFilter: (_req, file, cb) => {
     const isPdf = file.mimetype === 'application/pdf' || path.extname(file.originalname).toLowerCase() === '.pdf';
     cb(isPdf ? null : new Error('Only PDF files are allowed'), isPdf);
   }
 });
-
 export const spreadsheetUpload = multer({
   storage: diskStorageFor(spreadsheetsDir),
-  limits: { fileSize: config.maxUploadMb * 1024 * 1024 },
+  limits: {
+    fileSize: config.maxUploadMb * 1024 * 1024
+  },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname || '').toLowerCase();
     const allowed = ['.csv', '.xlsx', '.xls'].includes(ext);
     cb(allowed ? null : new Error('Only CSV or Excel files are allowed'), allowed);
   }
 });
-
 export const clientDocumentUpload = multer({
   storage: clientDocumentStorage,
-  limits: { fileSize: config.maxUploadMb * 1024 * 1024 },
+  limits: {
+    fileSize: config.maxUploadMb * 1024 * 1024
+  },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname || '').toLowerCase();
     const allowed = ['.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx'].includes(ext);

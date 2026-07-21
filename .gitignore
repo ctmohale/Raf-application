@@ -1,5 +1,7 @@
 node_modules
 .env
+.env.*
+!.env.example
 server/data
 server/uploads/originals/*
 server/uploads/generated/*
@@ -9,4 +11,5 @@ server/uploads/client-documents/*
 !server/uploads/generated/.gitkeep
 !server/uploads/spreadsheets/.gitkeep
 client/dist
+client/dist.zip
 .DS_Store
