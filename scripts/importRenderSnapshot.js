@@ -43,19 +43,37 @@ let uploadedBytes = 0;
 for (const file of files) {
   if (!file?.path || typeof file.data !== 'string') continue;
   const contents = Buffer.from(file.data, 'base64');
-  const response = await fetch(`${baseUrl}/api/admin-import/file`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${login.token}`,
-      'content-type': 'application/octet-stream',
-      'x-snapshot-path': encodeURIComponent(file.path)
-    },
-    body: contents
-  });
-  const fileResult = await response.json();
-  if (!response.ok) throw new Error(fileResult.error || `File import failed (${response.status}): ${file.path}`);
+  let imported = false;
+  let lastError = '';
+  for (let attempt = 1; attempt <= 5 && !imported; attempt += 1) {
+    const response = await fetch(`${baseUrl}/api/admin-import/file`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${login.token}`,
+        'content-type': 'application/octet-stream',
+        'x-snapshot-path': encodeURIComponent(file.path)
+      },
+      body: contents
+    });
+    const responseText = await response.text();
+    let fileResult = {};
+    try {
+      fileResult = responseText ? JSON.parse(responseText) : {};
+    } catch {
+      // Preserve the status and file path in the error below when a proxy returns HTML.
+    }
+    imported = response.ok && fileResult.imported;
+    lastError = fileResult.error || `File import failed (${response.status}): ${file.path}${responseText ? ` - ${responseText.slice(0, 120)}` : ''}`;
+    if (!imported && attempt < 5 && [429, 502, 503, 504].includes(response.status)) {
+      await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+    } else if (!imported) {
+      break;
+    }
+  }
+  if (!imported) throw new Error(lastError);
   uploadedFiles += 1;
   uploadedBytes += contents.length;
+  await new Promise(resolve => setTimeout(resolve, 500));
 }
 
 console.log(JSON.stringify({ ...result, files: uploadedFiles, fileBytes: uploadedBytes }));
