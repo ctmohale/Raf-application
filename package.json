@@ -11,6 +11,8 @@
     "start": "node server/src/index.js",
     "build": "vite build --config client/vite.config.js",
     "db:check": "node server/src/db/check.js",
+    "snapshot:export": "node scripts/exportRenderSnapshot.js",
+    "snapshot:import": "node scripts/importRenderSnapshot.js",
     "seed": "node server/src/db/seed.js"
   },
   "dependencies": {

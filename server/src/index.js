@@ -9,6 +9,7 @@ import { db, initializeDatabase } from './db/db.js';
 import { ensureBootstrapAdmin } from './db/bootstrap.js';
 import { activityLogger, logRequestError } from './services/activityLog.js';
 import { activityLogsRouter } from './routes/activityLogs.js';
+import { adminImportRouter } from './routes/adminImport.js';
 import { authRouter } from './routes/auth.js';
 import { billingRouter } from './routes/billing.js';
 import { clientPortalRouter } from './routes/clientPortal.js';
@@ -48,6 +49,7 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 app.use('/api/auth', authRouter);
+app.use('/api/admin-import', adminImportRouter);
 app.use('/api/activity-logs', activityLogsRouter);
 app.use('/api/billing', billingRouter);
 app.use('/api/client-portal', clientPortalRouter);
