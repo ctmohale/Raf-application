@@ -67,6 +67,31 @@ async function restoreFiles(files) {
   return restored;
 }
 
+async function restoreFile(relativePath, contents) {
+  if (!relativePath) throw new Error('A snapshot file path is required');
+  const root = path.resolve(uploadsDir);
+  const destination = path.resolve(root, relativePath);
+  if (!destination.startsWith(`${root}${path.sep}`)) throw new Error(`Invalid snapshot file path: ${relativePath}`);
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.writeFile(destination, contents);
+}
+
+adminImportRouter.post(
+  '/file',
+  authenticate,
+  requireAdmin,
+  express.raw({ type: 'application/octet-stream', limit: '100mb' }),
+  async (req, res) => {
+    if (config.databaseDriver !== 'sqlite') {
+      return res.status(400).json({ error: 'Snapshot import is only available for the SQLite deployment' });
+    }
+    if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'A binary file body is required' });
+    const relativePath = decodeURIComponent(String(req.get('x-snapshot-path') || ''));
+    await restoreFile(relativePath, req.body);
+    return res.json({ imported: true, path: relativePath, bytes: req.body.length });
+  }
+);
+
 adminImportRouter.post(
   '/',
   authenticate,
