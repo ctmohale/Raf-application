@@ -1,12 +1,14 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import dotenv from 'dotenv';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const serverRoot = path.resolve(__dirname, '..');
 export const projectRoot = path.resolve(serverRoot, '..');
+export const dataDir = path.resolve(process.env.DATA_DIR || path.join(serverRoot, 'data'));
 export const uploadsDir = path.resolve(process.env.UPLOADS_DIR || path.join(serverRoot, 'uploads'));
 export const originalsDir = path.join(uploadsDir, 'originals');
 export const generatedDir = path.join(uploadsDir, 'generated');
@@ -15,7 +17,7 @@ export const clientUploadsDir = path.join(uploadsDir, 'client-documents');
 export const clientDistDir = path.join(projectRoot, 'client', 'dist');
 export const config = {
   port: Number(process.env.PORT || 4000),
-  jwtSecret: process.env.JWT_SECRET || 'dev-only-change-me',
+  jwtSecret: process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? crypto.randomBytes(32).toString('hex') : 'dev-only-change-me'),
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 25),
   billingRatePerApplication: Number(process.env.BILLING_RATE_PER_APPLICATION || 500),
@@ -25,6 +27,8 @@ export const config = {
   powerMailTemplateKey: process.env.POWERMAIL_TEMPLATE_KEY || '',
   openAiApiKey: process.env.OPENAI_API_KEY || '',
   aiExtractionModel: process.env.AI_EXTRACTION_MODEL || 'gpt-5-nano',
+  databaseDriver: process.env.DATABASE_DRIVER || (process.env.MYSQL_URL || process.env.MYSQLHOST || process.env.MYSQL_HOST ? 'mysql' : 'sqlite'),
+  sqliteDataDir: dataDir,
   mysqlUrl: process.env.MYSQL_URL || '',
   mysqlHost: process.env.MYSQLHOST || process.env.MYSQL_HOST || '127.0.0.1',
   mysqlPort: Number(process.env.MYSQLPORT || process.env.MYSQL_PORT || 3306),
@@ -37,10 +41,13 @@ const unsafeJwtSecrets = new Set(['', 'dev-only-change-me', 'change-me-to-a-long
 if (process.env.NODE_ENV === 'production' && unsafeJwtSecrets.has(config.jwtSecret)) {
   throw new Error('JWT_SECRET must be set to a long random value in production');
 }
-if (process.env.NODE_ENV === 'production' && !config.mysqlUrl && !process.env.MYSQLHOST && !process.env.MYSQL_HOST) {
+if (process.env.NODE_ENV === 'production' && config.databaseDriver === 'mysql' && !config.mysqlUrl && !process.env.MYSQLHOST && !process.env.MYSQL_HOST) {
   throw new Error('MYSQL_URL (or MYSQLHOST connection settings) must be configured in production');
 }
-for (const dir of [uploadsDir, originalsDir, generatedDir, spreadsheetsDir, clientUploadsDir]) {
+if (!['mysql', 'sqlite'].includes(config.databaseDriver)) {
+  throw new Error('DATABASE_DRIVER must be mysql or sqlite');
+}
+for (const dir of [dataDir, uploadsDir, originalsDir, generatedDir, spreadsheetsDir, clientUploadsDir]) {
   fs.mkdirSync(dir, {
     recursive: true
   });

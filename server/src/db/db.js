@@ -1,7 +1,9 @@
 import mysql from 'mysql2/promise';
+import path from 'node:path';
 import { config } from '../config.js';
 import { centralSchema } from './centralSchema.js';
 import { MySqlDatabase } from './mysqlDatabase.js';
+import { SqliteDatabase } from './sqliteDatabase.js';
 function mysqlOptions(database = config.mysqlDatabase, usePool = true) {
   let base;
   if (config.mysqlUrl) {
@@ -39,10 +41,10 @@ function mysqlOptions(database = config.mysqlDatabase, usePool = true) {
     } : {})
   };
 }
-export const pool = mysql.createPool(mysqlOptions());
-export const db = new MySqlDatabase(pool, {
-  close: true
-});
+export const pool = config.databaseDriver === 'mysql' ? mysql.createPool(mysqlOptions()) : null;
+export const db = config.databaseDriver === 'mysql'
+  ? new MySqlDatabase(pool, { close: true })
+  : new SqliteDatabase(path.join(config.sqliteDataDir, 'app.db'));
 const retryableConnectionErrors = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'PROTOCOL_CONNECTION_LOST', 'ER_CON_COUNT_ERROR']);
 export async function initializeDatabase({
   retries = Number(process.env.DB_CONNECT_RETRIES || 10)
@@ -59,7 +61,7 @@ export async function initializeDatabase({
       `).run();
       return;
     } catch (error) {
-      if (attempt >= retries || !retryableConnectionErrors.has(error.code)) throw error;
+      if (config.databaseDriver !== 'mysql' || attempt >= retries || !retryableConnectionErrors.has(error.code)) throw error;
       const delayMs = Number(process.env.DB_CONNECT_RETRY_MS || 3000);
       console.warn(`MySQL is unavailable (${error.code}); retrying in ${delayMs}ms (${attempt}/${retries})`);
       await new Promise(resolve => setTimeout(resolve, delayMs));

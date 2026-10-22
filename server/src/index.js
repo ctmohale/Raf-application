@@ -6,6 +6,7 @@ import cors from 'cors';
 import morgan from 'morgan';
 import { config, clientDistDir } from './config.js';
 import { db, initializeDatabase } from './db/db.js';
+import { ensureBootstrapAdmin } from './db/bootstrap.js';
 import { activityLogger, logRequestError } from './services/activityLog.js';
 import { activityLogsRouter } from './routes/activityLogs.js';
 import { authRouter } from './routes/auth.js';
@@ -20,6 +21,7 @@ import { usersRouter } from './routes/users.js';
 import { closeFirmDatabases } from './services/firmDatabases.js';
 const app = express();
 await initializeDatabase();
+await ensureBootstrapAdmin();
 app.use(cors({
   origin: config.clientOrigin,
   credentials: true

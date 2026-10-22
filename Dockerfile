@@ -14,6 +14,8 @@ FROM node:22-bookworm-slim AS runtime
 
 ENV NODE_ENV=production \
     PORT=4000 \
+    DATABASE_DRIVER=sqlite \
+    DATA_DIR=/app/storage/data \
     UPLOADS_DIR=/app/storage/uploads
 
 WORKDIR /app

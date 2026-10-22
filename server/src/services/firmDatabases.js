@@ -6,6 +6,7 @@ import { clientUploadsDir, config } from '../config.js';
 import { pool, getMySqlOptions } from '../db/db.js';
 import { firmSchema } from '../db/firmSchema.js';
 import { MySqlDatabase } from '../db/mysqlDatabase.js';
+import { SqliteDatabase } from '../db/sqliteDatabase.js';
 export const coreClientDocumentRequests = Object.freeze([['claimant_id', 'ID / Passport', 'Certified identity document.'], ['police_accident_report', 'Police Report', 'Police accident records.'], ['client_accident_affidavit', 'Accident Affidavit', 'Signed accident statement.'], ['medical_documents', 'Medical Records', 'Treatment and medical records.'], ['medical_expenses', 'Medical Bills', 'Invoices and payment proof.'], ['employment_income', 'Employment & Income', 'Income and work records.'], ['banking_proof', 'Banking Proof', 'Bank letter or statement.'], ['photographs', 'Photos', 'Injury and accident photos.']]);
 const initializedFirmDatabases = new Set();
 const firmPools = new Map();
@@ -28,35 +29,44 @@ async function prepareFirmDatabase(firm, {
 } = {}) {
   const databaseName = getFirmDatabaseName(firm.database_filename);
   const needsInitialization = forceInitialize || !initializedFirmDatabases.has(databaseName);
-  if (needsInitialization) {
+  if (needsInitialization && config.databaseDriver === 'mysql') {
     await pool.query(`CREATE DATABASE IF NOT EXISTS ${quoteIdentifier(databaseName)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
   }
   let firmPool = firmPools.get(databaseName);
   if (!firmPool) {
-    firmPool = mysql.createPool({
-      ...getMySqlOptions(databaseName),
-      waitForConnections: true,
-      connectionLimit: Number(process.env.MYSQL_FIRM_POOL_SIZE || 3),
-      queueLimit: 0
-    });
+    if (config.databaseDriver === 'mysql') {
+      firmPool = mysql.createPool({
+        ...getMySqlOptions(databaseName),
+        waitForConnections: true,
+        connectionLimit: Number(process.env.MYSQL_FIRM_POOL_SIZE || 3),
+        queueLimit: 0
+      });
+    } else {
+      const firmsDir = path.join(config.sqliteDataDir, 'firms');
+      fs.mkdirSync(firmsDir, { recursive: true });
+      firmPool = new SqliteDatabase(path.join(firmsDir, `${databaseName}.db`), { close: false });
+    }
     firmPools.set(databaseName, firmPool);
   }
-  const firmDb = new MySqlDatabase(firmPool);
+  const firmDb = config.databaseDriver === 'mysql' ? new MySqlDatabase(firmPool) : firmPool;
   if (needsInitialization) {
     await firmDb.exec(firmSchema);
+    const profileUpsert = config.databaseDriver === 'mysql' ? `
+        ON DUPLICATE KEY UPDATE
+          central_firm_id = VALUES(central_firm_id), name = VALUES(name), slug = VALUES(slug),
+          contact_name = VALUES(contact_name), contact_email = VALUES(contact_email),
+          contact_phone = VALUES(contact_phone), address = VALUES(address), updated_at = CURRENT_TIMESTAMP
+      ` : `
+        ON CONFLICT(id) DO UPDATE SET
+          central_firm_id = excluded.central_firm_id, name = excluded.name, slug = excluded.slug,
+          contact_name = excluded.contact_name, contact_email = excluded.contact_email,
+          contact_phone = excluded.contact_phone, address = excluded.address, updated_at = CURRENT_TIMESTAMP
+      `;
     await firmDb.prepare(`
       INSERT INTO firm_profile
         (id, central_firm_id, name, slug, contact_name, contact_email, contact_phone, address)
       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        central_firm_id = VALUES(central_firm_id),
-        name = VALUES(name),
-        slug = VALUES(slug),
-        contact_name = VALUES(contact_name),
-        contact_email = VALUES(contact_email),
-        contact_phone = VALUES(contact_phone),
-        address = VALUES(address),
-        updated_at = CURRENT_TIMESTAMP
+      ${profileUpsert}
     `).run(firm.id, firm.name, firm.slug, firm.contact_name || null, firm.contact_email || null, firm.contact_phone || null, firm.address || null);
     const firmUploadDir = path.join(clientUploadsDir, firm.slug);
     fs.mkdirSync(firmUploadDir, {
@@ -86,12 +96,22 @@ export async function initializeFirmDatabase(firm) {
 export async function dropFirmDatabase(firm) {
   const databaseName = getFirmDatabaseName(firm.database_filename);
   const firmPool = firmPools.get(databaseName);
-  if (firmPool) await firmPool.end();
+  if (firmPool) {
+    if (config.databaseDriver === 'mysql') await firmPool.end();
+    else await firmPool.close(true);
+  }
   firmPools.delete(databaseName);
-  await pool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)}`);
+  if (config.databaseDriver === 'mysql') {
+    await pool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)}`);
+  } else {
+    const filename = path.join(config.sqliteDataDir, 'firms', `${databaseName}.db`);
+    for (const suffix of ['', '-wal', '-shm']) {
+      if (fs.existsSync(`${filename}${suffix}`)) fs.unlinkSync(`${filename}${suffix}`);
+    }
+  }
   initializedFirmDatabases.delete(databaseName);
 }
 export async function closeFirmDatabases() {
-  await Promise.all([...firmPools.values()].map(firmPool => firmPool.end()));
+  await Promise.all([...firmPools.values()].map(firmPool => config.databaseDriver === 'mysql' ? firmPool.end() : firmPool.close(true)));
   firmPools.clear();
 }
